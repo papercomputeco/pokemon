@@ -12,6 +12,9 @@ frames/
 # Tapes telemetry (SQLite DB + local config)
 .tapes/
 
+# Plans (ephemeral working artifacts, never commit)
+docs/plans/
+
 # macOS
 .DS_Store
 
