@@ -2,8 +2,6 @@ Model: Opus 4.6
 
 # Log 2: Getting Past the Intro
 
-**Model:** GPT-5 Codex
-
 ## How Host-Guest File Sharing Works
 
 When the sandbox starts, `jcard.toml` defines a shared directory:

@@ -1,6 +1,6 @@
-# Log 3: Overworld Loop Fix to Reach Professor Oak
+Model: GPT-5 Codex
 
-**Model:** GPT-5 Codex
+# Log 3: Overworld Loop Fix to Reach Professor Oak
 
 ## Goal
 

@@ -2,8 +2,6 @@ Model: Opus 4.6
 
 # Log 1: stereOS Setup for Pokemon Agent
 
-**Model:** GPT-5 Codex
-
 ## Directory Restructure
 
 Files were flat in the repo root. Reorganized to match `jcard.toml` expectations:
