@@ -308,11 +308,17 @@ class PokemonAgent:
         self.last_overworld_action: str | None = None
         self.stuck_turns = 0
         self.recent_positions: list[tuple[int, int, int]] = []
+        self.maps_visited: set[int] = set()
+        self.events: list[str] = []
 
         # Screenshot output directory
         self.frames_dir = SCRIPT_DIR.parent / "frames"
         if self.screenshots:
             self.frames_dir.mkdir(parents=True, exist_ok=True)
+
+        # Pokedex log directory
+        self.pokedex_dir = SCRIPT_DIR.parent / "pokedex"
+        self.pokedex_dir.mkdir(parents=True, exist_ok=True)
 
         # Load routes
         routes = {}
@@ -328,6 +334,8 @@ class PokemonAgent:
     def update_overworld_progress(self, state: OverworldState):
         """Track whether the last overworld action moved the player."""
         pos = (state.map_id, state.x, state.y)
+
+        self.maps_visited.add(state.map_id)
 
         if self.last_overworld_state is None:
             self.recent_positions.append(pos)
@@ -380,7 +388,54 @@ class PokemonAgent:
     def log(self, msg: str):
         """Structured log line for Tapes to capture."""
         timestamp = time.strftime("%H:%M:%S")
-        print(f"[{timestamp}] {msg}", flush=True)
+        line = f"[{timestamp}] {msg}"
+        print(line, flush=True)
+        self.events.append(line)
+
+    def write_pokedex_entry(self):
+        """Write a session summary to the pokedex directory."""
+        final_state = self.memory.read_overworld_state()
+        timestamp = time.strftime("%Y-%m-%d_%H%M%S")
+
+        # Find next log number
+        existing = list(self.pokedex_dir.glob("log*.md"))
+        next_num = len(existing) + 1
+        path = self.pokedex_dir / f"log{next_num}.md"
+
+        # Count notable events
+        map_changes = [e for e in self.events if "MAP CHANGE" in e]
+        battles = [e for e in self.events if "BATTLE" in e]
+        stuck_events = [e for e in self.events if "STUCK" in e]
+
+        lines = [
+            f"# Log {next_num}: Session {timestamp}",
+            "",
+            "## Summary",
+            "",
+            f"- **Turns:** {self.turn_count}",
+            f"- **Battles won:** {self.battles_won}",
+            f"- **Maps visited:** {len(self.maps_visited)} ({', '.join(str(m) for m in sorted(self.maps_visited))})",
+            f"- **Final position:** Map {final_state.map_id} ({final_state.x}, {final_state.y})",
+            f"- **Badges:** {final_state.badges}",
+            f"- **Party size:** {final_state.party_count}",
+            f"- **Strategy:** {self.battle_strategy.__class__.__name__}",
+            "",
+            "## Stats",
+            "",
+            f"- Map changes: {len(map_changes)}",
+            f"- Battle turns: {len(battles)}",
+            f"- Stuck events: {len(stuck_events)}",
+            "",
+            "## Event Log",
+            "",
+        ]
+
+        for event in self.events:
+            lines.append(f"    {event}")
+
+        lines.append("")
+        path.write_text("\n".join(lines))
+        self.log(f"POKEDEX | Wrote {path}")
 
     def take_screenshot(self):
         """Save current frame as turn{N}.png."""
@@ -500,7 +555,11 @@ class PokemonAgent:
                 self.take_screenshot()
 
         self.log(f"Session complete. Turns: {self.turn_count} | Wins: {self.battles_won}")
-        self.pyboy.stop()
+        self.write_pokedex_entry()
+        try:
+            self.pyboy.stop()
+        except PermissionError:
+            pass  # ROM save file write fails on read-only mounts
 
 
 # ---------------------------------------------------------------------------

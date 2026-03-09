@@ -166,19 +166,32 @@ mb up
 mb attach  # watch the agent play
 ```
 
+### Tapes Telemetry
+
 Tapes captures all LLM API calls made by the agent transparently — no instrumentation needed. Every battle decision, every route choice, every item use is logged with cryptographic audit trails.
+
+The install script sets up Tapes automatically (`tapes init --preset anthropic`). The agent runs through `tapes start`, which proxies API calls and stores sessions in `.tapes/`.
+
+After a run, inspect sessions:
+
+```bash
+tapes deck           # Terminal UI for session exploration
+tapes search "battle" # Search session turns
+tapes checkout <hash> # Restore a previous conversation state
+```
 
 ## File Structure
 
 ```
 pokemon-agent/
 ├── SKILL.md              # This file
+├── jcard.toml            # stereOS VM config
+├── .tapes/               # Tapes telemetry DB + config (gitignored)
 ├── scripts/
-│   ├── install.sh        # Setup script
+│   ├── install.sh        # Setup script (installs PyBoy + Tapes)
 │   ├── agent.py          # Main agent loop
 │   └── memory_reader.py  # Memory address utilities
 └── references/
-    ├── jcard.toml         # stereOS VM config
     ├── routes.json        # Overworld route plans
     └── type_chart.json    # Pokemon type effectiveness
 ```

@@ -9,6 +9,9 @@ rom/
 # Screenshot output
 frames/
 
+# Tapes telemetry (SQLite DB + local config)
+.tapes/
+
 # macOS
 .DS_Store
 
