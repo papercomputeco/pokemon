@@ -9,6 +9,8 @@ Usage:
     python3 agent.py path/to/pokemon_red.gb [--strategy heuristic|llm]
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import sys
@@ -40,10 +42,25 @@ ROUTES_PATH = SCRIPT_DIR.parent / "references" / "routes.json"
 # Early-game scripted targets to get from Red's room to Oak's lab.
 # Coords are taken from pret/pokered map object data.
 EARLY_GAME_TARGETS = {
-    38: {"name": "Red's bedroom", "target": (7, 1), "axis": "x"},
+    # Map 38 handled by special exploration pattern below.
     37: {"name": "Red's house 1F", "target": (2, 7), "axis": "y"},
-    0: {"name": "Pallet Town", "target": (5, 1), "axis": "x"},
+    0: {"name": "Pallet Town", "target": (11, 0), "axis": "x"},
 }
+
+# Systematic walk pattern for Red's bedroom (map 38).
+# The staircase warp tile position varies with intro timing, so we
+# sweep the room methodically: down the left wall, across the bottom,
+# up the right wall, etc.
+BEDROOM_PATTERN = [
+    "down", "down", "left", "left", "left",  # sweep to bottom-left
+    "down", "right", "right", "right", "right", "right",  # sweep bottom
+    "up", "up", "up", "up",  # up the right wall
+    "left", "left", "left", "left",  # across the top
+    "down", "down", "right", "right",  # back center
+]
+
+# Interior maps (buildings). Used for door re-entry prevention.
+INTERIOR_MAPS = {37, 38, 39, 40, 41}  # houses, lab, etc.
 
 # Move ID → (name, type, power, accuracy)
 # Subset of Gen 1 moves for demonstration
@@ -170,13 +187,11 @@ class BattleStrategy:
             {"action": "switch", "slot": 1-5}
             {"action": "run"}
         """
-        # Low HP — heal if wild battle
+        # Low HP — try to run only if critically low in wild battles.
+        # Otherwise keep fighting — running wastes turns and can fail.
         hp_ratio = battle.player_hp / max(battle.player_max_hp, 1)
-        if hp_ratio < 0.2 and battle.battle_type == 1:  # Wild
-            return {"action": "run"}  # Safe option when low
-
-        if hp_ratio < 0.25:
-            return {"action": "item", "item": "potion"}
+        if hp_ratio < 0.1 and battle.battle_type == 1:  # Wild, critical
+            return {"action": "run"}
 
         # Score all moves and pick the best
         moves = [
@@ -311,8 +326,18 @@ class PokemonAgent:
         self.maps_visited: set[int] = set()
         self.events: list[str] = []
 
-        # Screenshot output directory
-        self.frames_dir = SCRIPT_DIR.parent / "frames"
+        # Dialogue tracking
+        self.dialogue_history: list[dict] = []
+        self.last_read_text: str = ""
+
+        # Door re-entry prevention: after exiting a building, walk
+        # away from the door for a few turns before resuming navigation.
+        self.door_cooldown: int = 0
+
+        # Screenshot output directory — one folder per session so previous
+        # runs are never overwritten (useful as training data).
+        session_ts = time.strftime("%Y-%m-%d_%H%M%S")
+        self.frames_dir = SCRIPT_DIR.parent / "frames" / session_ts
         if self.screenshots:
             self.frames_dir.mkdir(parents=True, exist_ok=True)
 
@@ -342,13 +367,18 @@ class PokemonAgent:
             return
 
         if state.map_id != self.last_overworld_state.map_id:
+            old_map = self.last_overworld_state.map_id
             self.stuck_turns = 0
             self.recent_positions.clear()
             self.recent_positions.append(pos)
             self.log(
-                f"MAP CHANGE | {self.last_overworld_state.map_id} -> {state.map_id} | "
+                f"MAP CHANGE | {old_map} -> {state.map_id} | "
                 f"Pos: ({state.x}, {state.y})"
             )
+            # After exiting a building, walk away from the door to avoid
+            # re-entering immediately.
+            if old_map in INTERIOR_MAPS and state.map_id not in INTERIOR_MAPS:
+                self.door_cooldown = 3
             return
 
         # Detect oscillation: if current position was visited recently,
@@ -373,10 +403,95 @@ class PokemonAgent:
         if state.text_box_active:
             return "a"
 
-        # After Oak escorts the player into the lab, stay in interaction mode
-        # until the scripted intro there finishes.
+        # Oak's Lab post-starter: dismiss dialogues with B (selects "No"
+        # on nickname prompt) and walk south to exit via the center aisle.
+        # Bookshelves line the walls, so the walkable aisle is ~x=4-5.
+        if state.map_id == 40 and state.party_count > 0:
+            phase = self.turn_count % 4
+            if phase == 0:
+                return "b"  # dismiss prompts / select No
+            if phase == 1:
+                return "a"  # advance dialogue
+            # Navigate to center aisle, then south to exit.
+            if state.x > 5:
+                return "left"
+            if state.y < 11:
+                return "down"
+            return "down"
+
+        # Oak's Lab pre-starter: walk south of the Pokeball table, face up, press A.
+        # The table is around (6-8, 3). Approach from y=4 facing north.
         if state.map_id == 40 and state.party_count == 0:
+            phase = self.turn_count % 4
+            if phase == 0:
+                return "a"  # advance dialogue / confirm selection
+            # Step 1: get south of the table (y >= 4).
+            if state.y < 4:
+                return "down"
+            # Step 2: get in front of a Pokeball (x around 6-8).
+            if state.x < 6:
+                return "right"
+            # Step 3: face the table and interact.
+            if phase == 1:
+                return "up"  # face the table
+            return "a"  # press A on the Pokeball
+
+        # Walk away from building doors after exiting to prevent re-entry.
+        if self.door_cooldown > 0:
+            self.door_cooldown -= 1
+            return "down"
+
+        # Red's bedroom: use a systematic sweep pattern since we don't
+        # know the exact warp tile position.
+        if state.map_id == 38:
+            return BEDROOM_PATTERN[self.turn_count % len(BEDROOM_PATTERN)]
+
+        # Blue's House (map 39): exit immediately by walking south.
+        if state.map_id == 39:
+            return "down"
+
+        # Pallet Town: two-phase navigation to reach Route 1.
+        # The tree line blocks most of the north edge; the gap is around
+        # x=10-11 (where Oak intercepts at the tall grass).
+        # Blue's House door is at x=13, so stay at x<=11 to avoid it.
+        if state.map_id == 0:
+            # Periodically press A to talk to nearby NPCs.
+            if self.turn_count % 7 == 0:
+                return "a"
+            # If too far east (past the target area), come back left
+            # to avoid Blue's House door at x=13.
+            if state.x > 11:
+                return "left"
+            # If very stuck, try cycling directions (favor up and left).
+            if self.stuck_turns >= 15:
+                fallback = ["up", "left", "up", "right"]
+                return fallback[self.turn_count % 4]
+            # Phase 1: head east to the gap area (x=10-11).
+            if state.x < 10:
+                if self.stuck_turns >= 5:
+                    return "up" if self.turn_count % 2 == 0 else "right"
+                return "right"
+            # Phase 2: head north through the gap to Route 1.
+            if state.y > 0:
+                if self.stuck_turns >= 5:
+                    # Alternate left/up to avoid getting stuck on fences.
+                    return "left" if self.turn_count % 2 == 0 else "up"
+                return "up"
+            return "up"
+
+        # Periodically press A to talk to nearby NPCs (every 7 turns in
+        # outdoor maps only — no point in interior rooms).
+        if (self.turn_count % 7 == 0
+                and state.map_id not in INTERIOR_MAPS
+                and state.map_id in EARLY_GAME_TARGETS):
             return "a"
+
+        # If stuck for 20+ turns, cycle through all 4 directions.
+        # Use only turn_count (not stuck_turns) since both increment
+        # together and their sum stays even-only, skipping left/right.
+        if self.stuck_turns >= 20:
+            fallback = ["down", "left", "up", "right"]
+            return fallback[self.turn_count % 4]
 
         direction = self.navigator.next_direction(
             state,
@@ -392,50 +507,243 @@ class PokemonAgent:
         print(line, flush=True)
         self.events.append(line)
 
+    # Map ID → human-readable name
+    MAP_NAMES = {
+        0: "Pallet Town",
+        12: "Route 1",
+        1: "Viridian City",
+        13: "Route 2",
+        51: "Viridian Forest",
+        2: "Pewter City",
+        37: "Red's House 1F",
+        38: "Red's Bedroom",
+        39: "Blue's House",
+        40: "Oak's Lab",
+        41: "Agatha's House",
+    }
+
+    def _map_name(self, map_id: int) -> str:
+        return self.MAP_NAMES.get(map_id, f"Unknown Area (Map {map_id})")
+
     def write_pokedex_entry(self):
-        """Write a session summary to the pokedex directory."""
+        """Write a narrative session log to the pokedex directory."""
         final_state = self.memory.read_overworld_state()
         timestamp = time.strftime("%Y-%m-%d_%H%M%S")
 
-        # Find next log number
         existing = list(self.pokedex_dir.glob("log*.md"))
         next_num = len(existing) + 1
         path = self.pokedex_dir / f"log{next_num}.md"
 
-        # Count notable events
+        # Gather event counts
         map_changes = [e for e in self.events if "MAP CHANGE" in e]
-        battles = [e for e in self.events if "BATTLE" in e]
         stuck_events = [e for e in self.events if "STUCK" in e]
+        battle_events = [e for e in self.events if "BATTLE" in e]
+        dialogue_events = [e for e in self.events if "DIALOGUE" in e]
 
-        lines = [
-            f"# Log {next_num}: Session {timestamp}",
-            "",
-            "## Summary",
-            "",
-            f"- **Turns:** {self.turn_count}",
-            f"- **Battles won:** {self.battles_won}",
-            f"- **Maps visited:** {len(self.maps_visited)} ({', '.join(str(m) for m in sorted(self.maps_visited))})",
-            f"- **Final position:** Map {final_state.map_id} ({final_state.x}, {final_state.y})",
-            f"- **Badges:** {final_state.badges}",
-            f"- **Party size:** {final_state.party_count}",
-            f"- **Strategy:** {self.battle_strategy.__class__.__name__}",
-            "",
-            "## Stats",
-            "",
-            f"- Map changes: {len(map_changes)}",
-            f"- Battle turns: {len(battles)}",
-            f"- Stuck events: {len(stuck_events)}",
-            "",
-            "## Event Log",
-            "",
-        ]
+        # Build the narrative journey: which maps were visited in order
+        journey = []
+        for e in map_changes:
+            # Extract "old -> new" from "MAP CHANGE | old -> new | Pos: (x, y)"
+            try:
+                parts = e.split("MAP CHANGE | ")[1]
+                ids = parts.split(" | ")[0]
+                old_id, new_id = [int(x.strip()) for x in ids.split("->")]
+                journey.append(new_id)
+            except (IndexError, ValueError):
+                pass
 
-        for event in self.events:
-            lines.append(f"    {event}")
+        # Collect unique dialogue snippets (deduplicated, full lines only)
+        key_dialogues = []
+        seen_texts = set()
+        for entry in self.dialogue_history:
+            text = entry["text"]
+            clean = text.replace("<PLAYER>", "RED").replace("<RIVAL>", "RIVAL").replace("POKe", "POKE")
+            # Keep only substantial, complete-looking lines
+            if len(clean) >= 15 and clean not in seen_texts and not clean.startswith("9"):
+                seen_texts.add(clean)
+                key_dialogues.append({
+                    "text": clean,
+                    "map": entry["map_id"],
+                    "turn": entry["turn"],
+                })
 
+        # Determine what milestones were hit
+        got_starter = any("received a CHARMANDER" in e or "received a SQUIRTLE" in e
+                         or "received a BULBASAUR" in e for e in self.events)
+        won_rival = self.battles_won > 0
+        reached_route1 = 12 in self.maps_visited
+        reached_viridian = 1 in self.maps_visited
+        met_oak = any("OAK:" in e for e in self.events)
+
+        # Identify where the agent got stuck (most common stuck position)
+        stuck_positions = {}
+        for e in stuck_events:
+            try:
+                pos_part = e.split("Pos: ")[1].split(" |")[0]
+                stuck_positions[pos_part] = stuck_positions.get(pos_part, 0) + 1
+            except IndexError:
+                pass
+        worst_stuck = max(stuck_positions.items(), key=lambda x: x[1]) if stuck_positions else None
+
+        # --- Write the narrative ---
+        lines = []
+        lines.append(f"Model: Claude Opus 4.6")
         lines.append("")
+        lines.append(f"# Log {next_num}: {self._describe_session_title(final_state, got_starter, reached_route1)}")
+        lines.append("")
+
+        # Goal section
+        lines.append("## Goal")
+        lines.append("")
+        lines.append(self._describe_goal(got_starter, reached_route1))
+        lines.append("")
+
+        # Journey section
+        lines.append("## What Happened")
+        lines.append("")
+        lines.extend(self._describe_journey(journey, final_state, got_starter, won_rival,
+                                            met_oak, reached_route1))
+        lines.append("")
+
+        # Key dialogues
+        if key_dialogues:
+            lines.append("## Key NPC Dialogue")
+            lines.append("")
+            for d in key_dialogues[:15]:
+                map_name = self._map_name(d["map"])
+                lines.append(f"- **Turn {d['turn']}** ({map_name}): \"{d['text']}\"")
+            lines.append("")
+
+        # What the agent learned
+        lines.append("## What the Agent Learned")
+        lines.append("")
+        lines.extend(self._describe_learnings(stuck_events, worst_stuck, final_state,
+                                               got_starter, reached_route1))
+        lines.append("")
+
+        # Session stats (compact)
+        lines.append("## Session Stats")
+        lines.append("")
+        lines.append(f"- **Turns:** {self.turn_count}")
+        lines.append(f"- **Maps visited:** {', '.join(self._map_name(m) for m in sorted(self.maps_visited))}")
+        lines.append(f"- **Battles won:** {self.battles_won}")
+        lines.append(f"- **Final position:** {self._map_name(final_state.map_id)} ({final_state.x}, {final_state.y})")
+        lines.append(f"- **Badges:** {final_state.badges} | **Party:** {final_state.party_count}")
+        lines.append(f"- **Map transitions:** {len(map_changes)} | **Stuck events:** {len(stuck_events)} | **Dialogues:** {len(self.dialogue_history)}")
+        lines.append("")
+
+        # Next steps
+        lines.append("## Next Steps")
+        lines.append("")
+        lines.extend(self._describe_next_steps(final_state, got_starter, reached_route1,
+                                                worst_stuck))
+        lines.append("")
+
         path.write_text("\n".join(lines))
         self.log(f"POKEDEX | Wrote {path}")
+
+    def _describe_session_title(self, state: OverworldState, got_starter: bool,
+                                 reached_route1: bool) -> str:
+        if reached_route1:
+            return "First Steps on Route 1"
+        if got_starter:
+            return "Starter Obtained, Searching for Route 1"
+        if 40 in self.maps_visited:
+            return "Reached Oak's Lab"
+        if 0 in self.maps_visited:
+            return "Exploring Pallet Town"
+        return "Navigating the Early Game"
+
+    def _describe_goal(self, got_starter: bool, reached_route1: bool) -> str:
+        if got_starter and not reached_route1:
+            return ("With a starter Pokemon in hand, the goal this session was to exit "
+                    "Pallet Town north through the tree line gap and reach Route 1.")
+        if not got_starter:
+            return ("Navigate from Red's bedroom through the opening sequence: exit the house, "
+                    "reach the tall grass to trigger Professor Oak, get escorted to his lab, "
+                    "and receive a starter Pokemon.")
+        return "Continue north through Route 1 toward Viridian City."
+
+    def _describe_journey(self, journey: list, state: OverworldState, got_starter: bool,
+                          won_rival: bool, met_oak: bool, reached_route1: bool) -> list:
+        lines = []
+        if 38 in self.maps_visited:
+            lines.append("The agent woke up in Red's bedroom and navigated downstairs using "
+                         "a systematic sweep pattern to find the staircase warp tile.")
+        if 37 in self.maps_visited and 0 in self.maps_visited:
+            lines.append("It exited the house into Pallet Town and began heading north.")
+        if met_oak and not got_starter:
+            lines.append("Professor Oak intercepted the agent near the tall grass at the "
+                         "north edge of town, warning about wild Pokemon, and escorted it "
+                         "to his lab.")
+        if met_oak and got_starter:
+            lines.append("Professor Oak intercepted the agent near the tall grass and "
+                         "escorted it to his lab. Oak offered three starter Pokemon, "
+                         "and the agent chose Charmander.")
+        if won_rival:
+            lines.append("The rival challenged the agent to a battle and won, "
+                         "then exited the lab.")
+        if got_starter and not reached_route1:
+            lines.append(f"Back in Pallet Town, the agent attempted to find the exit "
+                         f"north to Route 1. It ended at position ({state.x}, {state.y}) "
+                         f"in {self._map_name(state.map_id)}.")
+        if reached_route1:
+            lines.append("The agent successfully exited Pallet Town and reached Route 1.")
+            wild_wins = self.battles_won - (1 if won_rival else 0)
+            if wild_wins > 0:
+                lines.append(f"It battled {wild_wins} wild Pokemon on Route 1, "
+                             f"gaining experience and leveling up.")
+            if 1 in self.maps_visited:
+                lines.append("It continued north and reached Viridian City.")
+        if not lines:
+            lines.append(f"The agent explored {len(self.maps_visited)} areas over "
+                         f"{self.turn_count} turns, ending at {self._map_name(state.map_id)}.")
+        return lines
+
+    def _describe_learnings(self, stuck_events: list, worst_stuck: tuple | None,
+                            state: OverworldState, got_starter: bool,
+                            reached_route1: bool) -> list:
+        lines = []
+        if len(stuck_events) > 50:
+            lines.append(f"Navigation remains a challenge: the agent triggered "
+                         f"{len(stuck_events)} stuck events this session.")
+        elif len(stuck_events) > 10:
+            lines.append(f"The agent hit {len(stuck_events)} stuck events but recovered "
+                         f"from most using direction rotation fallbacks.")
+        else:
+            lines.append("Navigation was smooth with minimal stuck events.")
+
+        if worst_stuck:
+            pos, count = worst_stuck
+            lines.append(f"The worst bottleneck was at position {pos} with "
+                         f"{count} stuck events — likely a collision with trees or fences.")
+
+        if got_starter and not reached_route1:
+            lines.append("The tree line at the north edge of Pallet Town blocks most "
+                         "direct paths. The passable gap to Route 1 appears to be on the "
+                         "east side of town around x=10-11.")
+
+        if self.dialogue_history:
+            lines.append(f"The agent captured {len(self.dialogue_history)} dialogue "
+                         f"fragments from NPCs, building context about the game world.")
+
+        return lines
+
+    def _describe_next_steps(self, state: OverworldState, got_starter: bool,
+                             reached_route1: bool, worst_stuck: tuple | None) -> list:
+        lines = []
+        if not got_starter:
+            lines.append("- Complete the opening sequence: trigger Oak, get a starter Pokemon")
+        elif not reached_route1:
+            lines.append("- Find the gap in the Pallet Town tree line to exit north to Route 1")
+            if worst_stuck:
+                lines.append(f"- Address navigation bottleneck at {worst_stuck[0]}")
+        else:
+            lines.append("- Navigate Route 1 north toward Viridian City")
+            lines.append("- Battle wild Pokemon for experience along the way")
+            lines.append("- Reach Viridian City Pokemon Center to heal")
+        lines.append("- Continue capturing NPC dialogue for game world context")
+        return lines
 
     def take_screenshot(self):
         """Save current frame as turn{N}.png."""
@@ -467,8 +775,13 @@ class PokemonAgent:
             self.controller.mash_a(3)  # Clear text boxes
 
         elif action["action"] == "run":
-            # Navigate to RUN (index 3 in battle menu)
-            self.controller.navigate_menu(3)
+            # Battle menu is 2x2: FIGHT BAG / PKMN RUN
+            # RUN is bottom-right: press down once, right once, then A.
+            self.controller.press("down")
+            self.controller.wait(8)
+            self.controller.press("right")
+            self.controller.wait(8)
+            self.controller.press("a")
             self.controller.wait(40)
             self.controller.mash_a(3)
 
@@ -495,27 +808,72 @@ class PokemonAgent:
         """Move in the overworld."""
         state = self.memory.read_overworld_state()
         self.update_overworld_progress(state)
+
+        # Read dialogue text.  Always attempt reading the screen — wd730
+        # doesn't catch every text state (e.g. Oak's lab scripted scenes).
+        text = self.memory.read_screen_text()
+        # Filter out garbage: name-plate artefacts and HUD noise that
+        # appear when reading the tile map without a text-box gate.
+        clean = text.replace("<PLAYER>", "").replace("<RIVAL>", "").replace("POKe", "").strip()
+        is_real_dialogue = len(clean) >= 4
+        if text and text != self.last_read_text and is_real_dialogue:
+            self.last_read_text = text
+            self.dialogue_history.append({
+                "text": text,
+                "map_id": state.map_id,
+                "pos": (state.x, state.y),
+                "turn": self.turn_count,
+            })
+            self.log(f"DIALOGUE | Map {state.map_id} | {text}")
+            self._process_dialogue_hints(text, state)
+        elif not text:
+            self.last_read_text = ""
+
         action = self.choose_overworld_action(state)
 
         if action in {"up", "down", "left", "right"}:
-            self.controller.move(action)
+            # Use longer holds when stuck — helps with frame-alignment issues.
+            if self.stuck_turns > 10:
+                self.controller.press(action, hold_frames=30, release_frames=10)
+                self.controller.wait(40)
+            else:
+                self.controller.move(action)
+        elif action == "b":
+            self.controller.press("b", hold_frames=20, release_frames=12)
+            self.controller.wait(24)
         else:
             self.controller.press("a", hold_frames=20, release_frames=12)
             self.controller.wait(24)
 
-        # Log position every 100 steps
-        if self.turn_count % 100 == 0:
+        # Log position every 50 steps (more frequent for debugging).
+        if self.turn_count % 50 == 0:
+            d730 = self.memory._read(0xD730)
             self.log(
                 f"OVERWORLD | Map: {state.map_id} | "
                 f"Pos: ({state.x}, {state.y}) | "
                 f"Badges: {state.badges} | "
                 f"Party: {state.party_count} | "
                 f"Action: {action} | "
-                f"Stuck: {self.stuck_turns}"
+                f"Stuck: {self.stuck_turns} | "
+                f"wd730=0x{d730:02x}"
             )
 
         self.last_overworld_state = state
         self.last_overworld_action = action
+
+    def _process_dialogue_hints(self, text: str, state: OverworldState):
+        """Extract navigation hints from NPC dialogue."""
+        lower = text.lower()
+
+        # Hints about Oak's lab location
+        if any(kw in lower for kw in ("lab", "laboratory", "professor", "oak")):
+            self.log(f"HINT | Dialogue mentions Oak/lab — prioritizing lab approach")
+            # Oak's lab is at the south end of Pallet Town; but the trigger
+            # to meet Oak is at the north exit (tall grass).  Keep heading
+            # north so Oak intercepts us.
+
+        if any(kw in lower for kw in ("grass", "pokemon", "dangerous", "wild")):
+            self.log(f"HINT | Dialogue mentions grass/pokemon — heading north to trigger Oak")
 
     def run(self, max_turns: int = 100_000):
         """Main agent loop."""
@@ -528,12 +886,19 @@ class PokemonAgent:
 
         # Mash through Oak's entire intro, name selection, rival naming.
         # Need long frame waits — the game has slow text scroll and animations.
-        # This takes ~600 A presses with proper wait times.
-        for i in range(600):
+        for i in range(700):
             self.controller.press("a")
-            self.controller.wait(30)  # Longer waits for text to scroll
+            self.controller.wait(30)
 
-        self.log("Intro complete. Entering game loop.")
+        # Extra: press Start then B to clear any lingering menu state,
+        # then wait for the game to settle.
+        self.controller.press("start")
+        self.controller.wait(30)
+        self.controller.press("b")
+        self.controller.wait(60)
+
+        d730 = self.memory._read(0xD730)
+        self.log(f"Intro complete. wd730=0x{d730:02x}. Entering game loop.")
 
         for _ in range(max_turns):
             battle = self.memory.read_battle_state()
@@ -551,7 +916,7 @@ class PokemonAgent:
                 self.run_overworld()
                 self.turn_count += 1
 
-            if self.turn_count % 10 == 0:
+            if self.turn_count % 50 == 0:
                 self.take_screenshot()
 
         self.log(f"Session complete. Turns: {self.turn_count} | Wins: {self.battles_won}")

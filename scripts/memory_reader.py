@@ -9,6 +9,28 @@ from dataclasses import dataclass, field
 from typing import List
 
 
+# Pokemon Red/Blue character encoding (tile index → character).
+# Font tiles are arranged so the tile index matches the character code.
+POKEMON_CHAR_MAP = {
+    0x7F: ' ',
+    # Uppercase A-Z (0x80-0x99)
+    **{0x80 + i: chr(ord('A') + i) for i in range(26)},
+    0x9A: '(', 0x9B: ')', 0x9C: ':', 0x9D: ';', 0x9E: '[', 0x9F: ']',
+    # Lowercase a-z (0xA0-0xB9)
+    **{0xA0 + i: chr(ord('a') + i) for i in range(26)},
+    0xBA: 'e',  # é
+    0xBB: "'d", 0xBC: "'l", 0xBD: "'s", 0xBE: "'t", 0xBF: "'v",
+    0xE0: "'", 0xE3: '-', 0xE6: '?', 0xE7: '!', 0xE8: '.',
+    0xF3: '/', 0xF4: ',',
+    # Digits 0-9 (0xF6-0xFF)
+    **{0xF6 + i: str(i) for i in range(10)},
+    # Special tokens
+    0x54: 'POKe',
+    0x52: '<PLAYER>',
+    0x53: '<RIVAL>',
+}
+
+
 @dataclass
 class BattleState:
     """Current battle context."""
@@ -104,6 +126,16 @@ class MemoryReader:
     # bit 6: text/script display active (set by DisplayTextID)
     ADDR_WD730             = 0xD730
 
+    # Screen tile map (wTileMap) — 20×18 tile buffer in WRAM.
+    # The game writes character tile indices here before copying to VRAM.
+    ADDR_TILE_MAP          = 0xC3A0
+    SCREEN_WIDTH           = 20
+    # Standard NPC text box: rows 14 and 16 (0-indexed), columns 1-18.
+    TEXT_ROW_1             = 14
+    TEXT_ROW_2             = 16
+    TEXT_COL_START         = 1
+    TEXT_COL_END           = 19  # exclusive
+
     def __init__(self, pyboy):
         self.pyboy = pyboy
 
@@ -190,6 +222,34 @@ class MemoryReader:
         # bit 5 (0x20): simulated joypad (scripted NPC movement)
         # bit 6 (0x40): text/script display in progress
         return bool(d730 & 0x62)
+
+    def read_screen_text(self) -> str:
+        """Read text displayed in the on-screen text box.
+
+        Pokemon Red renders NPC dialogue to wTileMap using the same tile
+        indices as its character encoding.  The standard text box places
+        two lines of text at rows 14 and 16 (columns 1-18).
+
+        Always reads the tile map — the caller decides whether to use
+        the result.  Returns empty string when no recognisable text is
+        found in the text-box area.
+        """
+        lines = []
+        for row in (self.TEXT_ROW_1, self.TEXT_ROW_2):
+            base = self.ADDR_TILE_MAP + row * self.SCREEN_WIDTH
+            chars = []
+            for col in range(self.TEXT_COL_START, self.TEXT_COL_END):
+                byte = self._read(base + col)
+                if byte == 0x50:  # string terminator
+                    break
+                ch = POKEMON_CHAR_MAP.get(byte, '')
+                if ch:
+                    chars.append(ch)
+            line = ''.join(chars).strip()
+            if line:
+                lines.append(line)
+
+        return ' '.join(lines)
 
     def _read_party_hp(self, count: int) -> list[int]:
         """Read HP for each party member."""

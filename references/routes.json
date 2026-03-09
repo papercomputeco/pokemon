@@ -5,7 +5,7 @@
     "name": "Pallet Town",
     "waypoints": [
       {"x": 5, "y": 5, "note": "Start position"},
-      {"x": 5, "y": 1, "note": "Exit north to Route 1"}
+      {"x": 11, "y": 0, "note": "Exit north to Route 1 (gap in tree line)"}
     ]
   },
 
