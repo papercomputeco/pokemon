@@ -1,0 +1,28 @@
+[project]
+name = "pokemon-agent"
+version = "0.1.0"
+description = "Autonomous Pokemon Red player via PyBoy"
+requires-python = ">=3.11"
+dependencies = [
+    "pyboy",
+    "pillow",
+    "numpy",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "pytest-cov",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["scripts"]
+
+[tool.coverage.run]
+source = ["scripts"]
+omit = ["scripts/diagnose.py", "scripts/install.sh"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 100
