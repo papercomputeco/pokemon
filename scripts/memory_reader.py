@@ -98,8 +98,11 @@ class MemoryReader:
     ADDR_MONEY_2           = 0xD348
     ADDR_MONEY_3           = 0xD349
 
-    # Text / menu state
-    ADDR_TEXT_BOX          = 0xC4F2  # Approximate — nonzero when text displaying
+    # Game state flags (pokered wd730)
+    # bit 1: d-pad input disabled (text boxes, menus)
+    # bit 5: simulated joypad active (scripted movement, e.g. Oak walking)
+    # bit 6: text/script display active (set by DisplayTextID)
+    ADDR_WD730             = 0xD730
 
     def __init__(self, pyboy):
         self.pyboy = pyboy
@@ -177,8 +180,16 @@ class MemoryReader:
             party_count=party_count,
             party_hp=self._read_party_hp(party_count),
             money=self._read_bcd(self.ADDR_MONEY_1, self.ADDR_MONEY_2, self.ADDR_MONEY_3),
-            text_box_active=self._read(self.ADDR_TEXT_BOX) != 0,
+            text_box_active=self._is_text_or_script_active(),
         )
+
+    def _is_text_or_script_active(self) -> bool:
+        """Detect text box / menu / scripted movement via wd730 flags."""
+        d730 = self._read(self.ADDR_WD730)
+        # bit 1 (0x02): d-pad disabled (text/menu active)
+        # bit 5 (0x20): simulated joypad (scripted NPC movement)
+        # bit 6 (0x40): text/script display in progress
+        return bool(d730 & 0x62)
 
     def _read_party_hp(self, count: int) -> list[int]:
         """Read HP for each party member."""

@@ -41,8 +41,8 @@ ROUTES_PATH = SCRIPT_DIR.parent / "references" / "routes.json"
 # Coords are taken from pret/pokered map object data.
 EARLY_GAME_TARGETS = {
     38: {"name": "Red's bedroom", "target": (7, 1), "axis": "x"},
-    37: {"name": "Red's house 1F", "target": (3, 7), "axis": "x"},
-    0: {"name": "Pallet Town", "target": (8, 1), "axis": "x"},
+    37: {"name": "Red's house 1F", "target": (2, 7), "axis": "y"},
+    0: {"name": "Pallet Town", "target": (5, 1), "axis": "x"},
 }
 
 # Move ID → (name, type, power, accuracy)
@@ -97,11 +97,12 @@ class GameController:
         self.pyboy = pyboy
 
     def press(self, button: str, hold_frames: int = 20, release_frames: int = 10):
-        """Press and release a button with frame advance."""
-        self.pyboy.button(button)
-        for _ in range(hold_frames):
-            self.pyboy.tick()
-        self.pyboy.button_release(button)
+        """Press and release a button with frame advance.
+
+        Uses pyboy.button() which handles press+hold+release internally.
+        button_press()/button_release() do not work reliably in headless mode.
+        """
+        self.pyboy.button(button, delay=hold_frames)
         for _ in range(release_frames):
             self.pyboy.tick()
 
@@ -110,10 +111,10 @@ class GameController:
         for _ in range(frames):
             self.pyboy.tick()
 
-    def move(self, direction: str, hold_frames: int = 24, settle_frames: int = 30):
-        """Move a single tile in the overworld with slower timing."""
-        self.press(direction, hold_frames=hold_frames, release_frames=12)
-        self.wait(settle_frames)
+    def move(self, direction: str):
+        """Move a single tile in the overworld."""
+        self.press(direction, hold_frames=20, release_frames=8)
+        self.wait(30)
 
     def mash_a(self, times: int = 5, delay: int = 20):
         """Mash A to advance text boxes."""
@@ -306,6 +307,7 @@ class PokemonAgent:
         self.last_overworld_state: OverworldState | None = None
         self.last_overworld_action: str | None = None
         self.stuck_turns = 0
+        self.recent_positions: list[tuple[int, int, int]] = []
 
         # Screenshot output directory
         self.frames_dir = SCRIPT_DIR.parent / "frames"
@@ -325,35 +327,38 @@ class PokemonAgent:
 
     def update_overworld_progress(self, state: OverworldState):
         """Track whether the last overworld action moved the player."""
-        if self.last_overworld_state is None:
-            return
+        pos = (state.map_id, state.x, state.y)
 
-        same_position = (
-            state.map_id == self.last_overworld_state.map_id
-            and state.x == self.last_overworld_state.x
-            and state.y == self.last_overworld_state.y
-        )
-        attempted_move = self.last_overworld_action in {"up", "down", "left", "right"}
+        if self.last_overworld_state is None:
+            self.recent_positions.append(pos)
+            return
 
         if state.map_id != self.last_overworld_state.map_id:
             self.stuck_turns = 0
+            self.recent_positions.clear()
+            self.recent_positions.append(pos)
             self.log(
                 f"MAP CHANGE | {self.last_overworld_state.map_id} -> {state.map_id} | "
                 f"Pos: ({state.x}, {state.y})"
             )
             return
 
-        if attempted_move and same_position and not state.text_box_active:
+        # Detect oscillation: if current position was visited recently,
+        # increment stuck counter so the navigator tries alternate directions.
+        if pos in self.recent_positions:
             self.stuck_turns += 1
-            if self.stuck_turns in {1, 3, 6}:
-                self.log(
-                    f"STUCK | Map: {state.map_id} | Pos: ({state.x}, {state.y}) | "
-                    f"Last move: {self.last_overworld_action} | Streak: {self.stuck_turns}"
-                )
-            return
-
-        if not same_position:
+        else:
             self.stuck_turns = 0
+
+        self.recent_positions.append(pos)
+        if len(self.recent_positions) > 8:
+            self.recent_positions.pop(0)
+
+        if self.stuck_turns in {2, 5, 10}:
+            self.log(
+                f"STUCK | Map: {state.map_id} | Pos: ({state.x}, {state.y}) | "
+                f"Last move: {self.last_overworld_action} | Streak: {self.stuck_turns}"
+            )
 
     def choose_overworld_action(self, state: OverworldState) -> str:
         """Pick the next overworld action."""
@@ -438,9 +443,7 @@ class PokemonAgent:
         action = self.choose_overworld_action(state)
 
         if action in {"up", "down", "left", "right"}:
-            hold_frames = 28 if self.stuck_turns >= 2 else 24
-            settle_frames = 36 if state.map_id in EARLY_GAME_TARGETS else 30
-            self.controller.move(action, hold_frames=hold_frames, settle_frames=settle_frames)
+            self.controller.move(action)
         else:
             self.controller.press("a", hold_frames=20, release_frames=12)
             self.controller.wait(24)
