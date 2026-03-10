@@ -203,10 +203,12 @@ class BattleStrategy:
 class Navigator:
     """Simple overworld movement."""
 
-    def __init__(self, routes: dict):
+    def __init__(self, routes: dict, stuck_threshold: int = 8, skip_distance: int = 3):
         self.routes = routes
         self.current_waypoint = 0
         self.current_map = None
+        self.stuck_threshold = stuck_threshold
+        self.skip_distance = skip_distance
 
     def _add_direction(self, directions: list[str], direction: str | None):
         """Append a direction once while preserving order."""
@@ -318,7 +320,7 @@ class Navigator:
 
         # Skip waypoint if close enough but stuck too long
         dist = abs(state.x - tx) + abs(state.y - ty)
-        if stuck_turns >= 8 and dist <= 3 and self.current_waypoint < len(waypoints) - 1:
+        if stuck_turns >= self.stuck_threshold and dist <= self.skip_distance and self.current_waypoint < len(waypoints) - 1:
             self.current_waypoint += 1
             return self.next_direction(state, turn=turn, stuck_turns=0, collision_grid=collision_grid)
 
@@ -400,10 +402,33 @@ class PokemonAgent:
         if ROUTES_PATH.exists():
             with open(ROUTES_PATH) as f:
                 routes = json.load(f)
-        self.navigator = Navigator(routes)
+        self.navigator = Navigator(routes)  # re-created below with evolve params
+
+        # Apply evolvable parameters from environment (set by evolve.py)
+        self.evolve_params = {}
+        evolve_json = os.environ.get("EVOLVE_PARAMS")
+        if evolve_json:
+            try:
+                self.evolve_params = json.loads(evolve_json)
+            except json.JSONDecodeError:
+                pass
+        if "door_cooldown" in self.evolve_params:
+            self._evolve_door_cooldown = int(self.evolve_params["door_cooldown"])
+        else:
+            self._evolve_door_cooldown = 8
+
+        # Rebuild navigator with evolved params
+        if self.evolve_params:
+            self.navigator = Navigator(
+                routes,
+                stuck_threshold=int(self.evolve_params.get("stuck_threshold", 8)),
+                skip_distance=int(self.evolve_params.get("waypoint_skip_distance", 3)),
+            )
 
         print(f"[agent] Loaded ROM: {rom_path}")
         print(f"[agent] Strategy: {strategy}")
+        if self.evolve_params:
+            print(f"[agent] Evolve params: {json.dumps(self.evolve_params)}")
         print(f"[agent] Running headless — no display")
 
     def update_overworld_progress(self, state: OverworldState):
@@ -427,7 +452,7 @@ class PokemonAgent:
             # Set door cooldown when exiting interior maps to avoid re-entry
             prev = self.last_overworld_state.map_id
             if prev in (37, 38, 40) and state.map_id == 0:
-                self.door_cooldown = 8
+                self.door_cooldown = self._evolve_door_cooldown
             self.log(
                 f"MAP CHANGE | {prev} -> {state.map_id} | "
                 f"Pos: ({state.x}, {state.y})"
@@ -725,8 +750,23 @@ class PokemonAgent:
         self.last_overworld_state = state
         self.last_overworld_action = action
 
+    def compute_fitness(self) -> dict:
+        """Return structured metrics from the current run state."""
+        final = self.memory.read_overworld_state()
+        return {
+            "turns": self.turn_count,
+            "battles_won": self.battles_won,
+            "maps_visited": len(self.maps_visited),
+            "final_map_id": final.map_id,
+            "final_x": final.x,
+            "final_y": final.y,
+            "badges": final.badges,
+            "party_size": final.party_count,
+            "stuck_count": len([e for e in self.events if "STUCK" in e]),
+        }
+
     def run(self, max_turns: int = 100_000):
-        """Main agent loop."""
+        """Main agent loop. Returns fitness dict at end."""
         self.log("Agent starting. Advancing through intro...")
 
         # Advance through title screen (needs ~1500 frames to reach "Press Start")
@@ -772,10 +812,12 @@ class PokemonAgent:
 
         self.log(f"Session complete. Turns: {self.turn_count} | Wins: {self.battles_won}")
         self.write_pokedex_entry()
+        fitness = self.compute_fitness()
         try:
             self.pyboy.stop()
         except PermissionError:
             pass  # ROM save file write fails on read-only mounts
+        return fitness
 
 
 # ---------------------------------------------------------------------------
@@ -802,6 +844,12 @@ def main():
         action="store_true",
         help="Save periodic screenshots to ./frames/",
     )
+    parser.add_argument(
+        "--output-json",
+        type=str,
+        default=None,
+        help="Write fitness metrics JSON to this path at end of run",
+    )
     args = parser.parse_args()
 
     if not Path(args.rom).exists():
@@ -809,7 +857,11 @@ def main():
         sys.exit(1)
 
     agent = PokemonAgent(args.rom, strategy=args.strategy, screenshots=args.save_screenshots)
-    agent.run(max_turns=args.max_turns)
+    fitness = agent.run(max_turns=args.max_turns)
+
+    if args.output_json:
+        Path(args.output_json).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.output_json).write_text(json.dumps(fitness, indent=2) + "\n")
 
 
 if __name__ == "__main__":

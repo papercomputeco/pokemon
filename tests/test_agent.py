@@ -2,6 +2,7 @@
 
 import importlib
 import json
+import os
 import runpy
 import sys
 import time
@@ -1924,3 +1925,219 @@ class TestRunOverworldWaypointLogging:
         overworld_logs = [e for e in ag.events if "OVERWORLD" in e]
         assert len(overworld_logs) == 1
         assert "WP:" not in overworld_logs[0]
+
+
+# ===================================================================
+# compute_fitness()
+# ===================================================================
+
+
+class TestComputeFitness:
+    def test_returns_dict_with_expected_keys(self, tmp_path):
+        ag = _make_agent(tmp_path)
+        ag.turn_count = 42
+        ag.battles_won = 3
+        ag.maps_visited = {0, 1, 40}
+        ag.events = ["[t] STUCK | some info", "[t] other", "[t] STUCK again"]
+        ag.memory.read_overworld_state = MagicMock(
+            return_value=OverworldState(
+                map_id=1, x=5, y=10, badges=1, party_count=2
+            )
+        )
+
+        result = ag.compute_fitness()
+        assert result["turns"] == 42
+        assert result["battles_won"] == 3
+        assert result["maps_visited"] == 3
+        assert result["final_map_id"] == 1
+        assert result["final_x"] == 5
+        assert result["final_y"] == 10
+        assert result["badges"] == 1
+        assert result["party_size"] == 2
+        assert result["stuck_count"] == 2
+
+    def test_empty_state(self, tmp_path):
+        ag = _make_agent(tmp_path)
+        ag.memory.read_overworld_state = MagicMock(
+            return_value=OverworldState()
+        )
+        result = ag.compute_fitness()
+        assert result["turns"] == 0
+        assert result["stuck_count"] == 0
+
+
+# ===================================================================
+# run() returns fitness dict
+# ===================================================================
+
+
+class TestRunReturnsFitness:
+    def test_run_returns_fitness(self, tmp_path):
+        ag = _make_agent(tmp_path)
+        battle_none = BattleState(battle_type=0)
+        overworld = OverworldState(map_id=0, x=5, y=5)
+
+        ag.memory.read_battle_state = MagicMock(return_value=battle_none)
+        ag.memory.read_overworld_state = MagicMock(return_value=overworld)
+
+        with patch.object(agent, "Image", None):
+            result = ag.run(max_turns=1)
+
+        assert isinstance(result, dict)
+        assert "turns" in result
+        assert "battles_won" in result
+        assert "final_map_id" in result
+
+
+# ===================================================================
+# --output-json CLI flag
+# ===================================================================
+
+
+class TestOutputJsonFlag:
+    def test_output_json_writes_file(self, tmp_path):
+        rom = tmp_path / "game.gb"
+        rom.write_text("fake rom")
+        output = tmp_path / "fitness.json"
+
+        mock_agent = MagicMock()
+        mock_agent.run.return_value = {"turns": 10, "battles_won": 0}
+
+        with patch(
+            "sys.argv",
+            ["agent.py", str(rom), "--max-turns", "5",
+             "--output-json", str(output)],
+        ), patch("agent.PokemonAgent", return_value=mock_agent):
+            main()
+
+        data = json.loads(output.read_text())
+        assert data["turns"] == 10
+
+    def test_output_json_creates_parent_dirs(self, tmp_path):
+        rom = tmp_path / "game.gb"
+        rom.write_text("fake rom")
+        output = tmp_path / "deep" / "nested" / "fitness.json"
+
+        mock_agent = MagicMock()
+        mock_agent.run.return_value = {"turns": 5, "battles_won": 1}
+
+        with patch(
+            "sys.argv",
+            ["agent.py", str(rom), "--output-json", str(output)],
+        ), patch("agent.PokemonAgent", return_value=mock_agent):
+            main()
+
+        assert output.exists()
+
+    def test_no_output_json_by_default(self, tmp_path):
+        rom = tmp_path / "game.gb"
+        rom.write_text("fake rom")
+
+        mock_agent = MagicMock()
+        mock_agent.run.return_value = {"turns": 5}
+
+        with patch(
+            "sys.argv", ["agent.py", str(rom), "--max-turns", "5"]
+        ), patch("agent.PokemonAgent", return_value=mock_agent):
+            main()
+
+        # No fitness.json created anywhere in tmp_path
+        assert not list(tmp_path.glob("**/fitness.json"))
+
+
+# ===================================================================
+# EVOLVE_PARAMS environment variable
+# ===================================================================
+
+
+def _make_agent_with_evolve(tmp_path, evolve_params=None, routes=None):
+    """Build a PokemonAgent with EVOLVE_PARAMS env var set."""
+    from collections import defaultdict
+
+    mock_pb = MagicMock()
+    mock_pb.memory = defaultdict(int)
+
+    tc_path = tmp_path / "tc.json"
+    rp = tmp_path / "routes.json"
+    if routes is not None:
+        rp.write_text(json.dumps(routes))
+
+    env_patch = patch.dict(
+        os.environ,
+        {"EVOLVE_PARAMS": json.dumps(evolve_params)} if evolve_params else {},
+        clear=False,
+    )
+    # Remove EVOLVE_PARAMS if not set, to ensure clean state
+    if not evolve_params and "EVOLVE_PARAMS" in os.environ:
+        del os.environ["EVOLVE_PARAMS"]
+
+    with (
+        env_patch,
+        patch("agent.PyBoy", return_value=mock_pb),
+        patch.object(agent, "TYPE_CHART_PATH", tc_path),
+        patch.object(agent, "ROUTES_PATH", rp),
+        patch.object(agent, "SCRIPT_DIR", tmp_path),
+    ):
+        ag = PokemonAgent(
+            str(tmp_path / "fake.gb"),
+            strategy="low",
+        )
+
+    ag.pokedex_dir = tmp_path / "pokedex"
+    ag.pokedex_dir.mkdir(parents=True, exist_ok=True)
+    ag.frames_dir = tmp_path / "frames"
+
+    return ag
+
+
+class TestEvolveParams:
+    def test_valid_evolve_params_applied(self, tmp_path):
+        """Lines 411-416: valid JSON sets evolve_params and door_cooldown."""
+        params = {"stuck_threshold": 5, "door_cooldown": 12,
+                  "waypoint_skip_distance": 2, "axis_preference_map_0": "x"}
+        ag = _make_agent_with_evolve(tmp_path, evolve_params=params)
+        assert ag.evolve_params == params
+        assert ag._evolve_door_cooldown == 12
+        assert ag.navigator.stuck_threshold == 5
+        assert ag.navigator.skip_distance == 2
+
+    def test_invalid_json_ignored(self, tmp_path):
+        """Lines 413-414: invalid JSON -> evolve_params stays empty."""
+        from collections import defaultdict
+        mock_pb = MagicMock()
+        mock_pb.memory = defaultdict(int)
+        tc_path = tmp_path / "tc.json"
+        rp = tmp_path / "routes.json"
+
+        with (
+            patch.dict(os.environ, {"EVOLVE_PARAMS": "not json!!!"}),
+            patch("agent.PyBoy", return_value=mock_pb),
+            patch.object(agent, "TYPE_CHART_PATH", tc_path),
+            patch.object(agent, "ROUTES_PATH", rp),
+            patch.object(agent, "SCRIPT_DIR", tmp_path),
+        ):
+            ag = PokemonAgent(str(tmp_path / "fake.gb"), strategy="low")
+
+        assert ag.evolve_params == {}
+        assert ag._evolve_door_cooldown == 8
+
+    def test_no_evolve_params_uses_defaults(self, tmp_path):
+        """Default: no EVOLVE_PARAMS env -> defaults."""
+        saved = os.environ.pop("EVOLVE_PARAMS", None)
+        try:
+            ag = _make_agent_with_evolve(tmp_path)
+            assert ag.evolve_params == {}
+            assert ag._evolve_door_cooldown == 8
+            assert ag.navigator.stuck_threshold == 8
+            assert ag.navigator.skip_distance == 3
+        finally:
+            if saved is not None:
+                os.environ["EVOLVE_PARAMS"] = saved
+
+    def test_evolve_params_print_logged(self, tmp_path, capsys):
+        """Line 431: evolve params are printed when set."""
+        params = {"stuck_threshold": 5, "door_cooldown": 10,
+                  "waypoint_skip_distance": 2, "axis_preference_map_0": "y"}
+        _make_agent_with_evolve(tmp_path, evolve_params=params)
+        output = capsys.readouterr().out
+        assert "Evolve params" in output

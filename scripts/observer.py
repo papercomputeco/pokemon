@@ -220,6 +220,29 @@ class Observer:
         self.state_path.write_text(json.dumps(state, indent=2) + "\n")
 
 
+def observe_session_inline(db_path: str, session_id: str | None = None) -> list[dict]:
+    """Return observations as dicts for programmatic use (no file I/O).
+
+    If session_id is None, observes the most recent session.
+    Returns list of {"priority": str, "content": str} dicts.
+    """
+    reader = TapeReader(db_path)
+    sessions = reader.list_sessions()
+    if not sessions:
+        return []
+
+    target = session_id if session_id else sessions[-1]
+    session = reader.read_session(target)
+
+    # Reuse Observer's heuristic extraction without needing memory_dir
+    obs = Observer.__new__(Observer)
+    obs.db_path = Path(db_path)
+    obs.reader = reader
+    observations = obs.observe_session(session)
+
+    return [{"priority": o.priority, "content": o.content} for o in observations]
+
+
 def _first_user_message(session: TapeSession) -> str:
     """Extract the first user message text from a session.
 
