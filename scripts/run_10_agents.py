@@ -20,6 +20,9 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).parent
 AGENT_SCRIPT = SCRIPT_DIR / "agent.py"
 
+# Re-use the canonical scoring function from evolve.py
+from evolve import score
+
 # 10 parameter variants to try — tuned for reaching rival battle
 # Previous winner: door_cooldown=4 beat baseline for Pokemon selection
 _BT_DEFAULTS = {
@@ -71,19 +74,6 @@ PARAM_VARIANTS = [
 ]
 
 MAX_TURNS = 5000  # Intro + Pokemon selection + rival scripted sequence + battle + exit
-
-
-def score(fitness: dict) -> float:
-    """Composite fitness score."""
-    return (
-        fitness.get("final_map_id", 0) * 1000
-        + fitness.get("badges", 0) * 5000
-        + fitness.get("party_size", 0) * 500
-        + fitness.get("battles_won", 0) * 10
-        - fitness.get("stuck_count", 0) * 5
-        - fitness.get("turns", 0) * 0.1
-        - fitness.get("backtrack_restores", 0) * 2
-    )
 
 
 def run_one_agent(rom_path: str, params: dict, agent_id: int) -> dict:

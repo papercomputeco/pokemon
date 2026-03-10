@@ -15,7 +15,7 @@ import run_10_agents as mod
 from run_10_agents import (
     PARAM_VARIANTS,
     MAX_TURNS,
-    score,
+    score,  # re-exported from evolve
     run_one_agent,
     main,
 )
