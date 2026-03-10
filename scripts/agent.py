@@ -43,8 +43,9 @@ ROUTES_PATH = SCRIPT_DIR.parent / "references" / "routes.json"
 # Coords are taken from pret/pokered map object data.
 EARLY_GAME_TARGETS = {
     38: {"name": "Red's bedroom", "target": (7, 1), "axis": "x"},
-    37: {"name": "Red's house 1F", "target": (2, 7), "axis": "y"},
-    0: {"name": "Pallet Town (pre-Oak)", "target": (4, 0), "axis": "y"},
+    37: {"name": "Red's house 1F", "target": (3, 9), "axis": "y"},
+    # Map 0 (Pallet Town) uses waypoints from routes.json instead of a single target.
+    # The waypoint path (8,10)→(8,4)→(8,1)→(8,0) follows the center corridor to Route 1.
 }
 
 # Move ID → (name, type, power, accuracy)
@@ -236,12 +237,6 @@ class Navigator:
 
         ordered: list[str] = []
 
-        # When very stuck (5+), try perpendicular directions first to break free
-        if stuck_turns >= 5:
-            perpendicular = [horizontal, vertical] if axis_preference == "y" else [vertical, horizontal]
-            for direction in perpendicular:
-                self._add_direction(ordered, direction)
-
         primary = [horizontal, vertical] if axis_preference == "x" else [vertical, horizontal]
         secondary = [vertical, horizontal] if axis_preference == "x" else [horizontal, vertical]
 
@@ -249,11 +244,19 @@ class Navigator:
             self._add_direction(ordered, direction)
         for direction in secondary:
             self._add_direction(ordered, direction)
-        for direction in ("up", "right", "down", "left"):
-            self._add_direction(ordered, direction)
+
+        # Only add backward directions after being stuck a while
+        if stuck_turns >= 8:
+            for direction in ("up", "right", "down", "left"):
+                self._add_direction(ordered, direction)
 
         if not ordered:
             return None
+
+        # At low stuck counts, only cycle through forward directions
+        forward_count = min(2, len(ordered))
+        if stuck_turns < 8:
+            return ordered[stuck_turns % forward_count]
         return ordered[stuck_turns % len(ordered)]
 
     def _try_astar(self, state: OverworldState, target_x: int, target_y: int, collision_grid: list) -> str | None:
@@ -281,6 +284,9 @@ class Navigator:
             special_target = None
         if special_target:
             target_x, target_y = special_target["target"]
+            # At target: use at_target hint to walk through doors/grass
+            if state.x == target_x and state.y == target_y:
+                return special_target.get("at_target", "down")
             if collision_grid is not None:
                 astar_dir = self._try_astar(state, target_x, target_y, collision_grid)
                 if astar_dir is not None:
@@ -417,7 +423,7 @@ class PokemonAgent:
             # Set door cooldown when exiting interior maps to avoid re-entry
             prev = self.last_overworld_state.map_id
             if prev in (37, 38, 40) and state.map_id == 0:
-                self.door_cooldown = 5
+                self.door_cooldown = 8
             self.log(
                 f"MAP CHANGE | {prev} -> {state.map_id} | "
                 f"Pos: ({state.x}, {state.y})"
@@ -450,17 +456,68 @@ class PokemonAgent:
         if state.text_box_active:
             return "a"
 
-        # After exiting a building, wait frames to let scripts settle then walk south
+        # After exiting a building, walk away from the door to avoid re-entry
         if self.door_cooldown > 0:
             self.door_cooldown -= 1
-            if self.door_cooldown >= 3:
+            if self.door_cooldown >= 6:
                 self.controller.wait(60)  # let game scripts complete
                 return "a"  # dismiss any dialogue
-            return "down"  # walk south away from door
+            if self.door_cooldown >= 3:
+                return "down"  # walk south away from door
+            return "left"  # sidestep to avoid door on return north
 
-        # After Oak escorts the player into the lab, stay in interaction mode
-        # until the scripted intro there finishes.
+        # In Oak's lab with no Pokemon: walk to Pokeball table and pick one.
+        # Oak stands near (5,2) blocking north. Pressing A near him loops
+        # his dialogue. Going too far south triggers "Don't go away!"
+        # Strategy: A to dismiss text, down 1 to dodge Oak, right, up to table.
         if state.map_id == 40 and state.party_count == 0:
+            lab_script = self.memory._read(0xD5F1)
+            if self.turn_count % 50 == 0:
+                self.log(f"LAB | script={lab_script} pos=({state.x},{state.y}) "
+                         f"turn={self.turn_count}")
+                if self.turn_count % 200 == 0:
+                    self.take_screenshot(f"lab_t{self.turn_count}", force=True)
+
+            if not hasattr(self, '_lab_turns'):
+                self._lab_turns = 0
+            self._lab_turns += 1
+
+            # Pokeball sprites are at (6,3), (7,3), (8,3) ON the table.
+            # Interact from y=4 facing UP, or y=2 facing DOWN.
+            # Simplest path: B(clear) → down to y=4 → right to x=6 → up+A
+            if not hasattr(self, '_lab_phase'):
+                self._lab_phase = 0
+
+            if self._lab_phase == 0:
+                # Dismiss Oak's text with B, then move south
+                if state.y >= 4:
+                    self._lab_phase = 1
+                    self.log(f"LAB | phase 0→1 south at ({state.x},{state.y})")
+                    return "right"
+                if self._lab_turns % 2 == 1:
+                    return "b"
+                return "down"
+
+            elif self._lab_phase == 1:
+                # Go east to Pokeball column (x=6 = Charmander)
+                if state.x >= 6:
+                    self._lab_phase = 2
+                    self.log(f"LAB | phase 1→2 at pokeball column ({state.x},{state.y})")
+                    return "up"  # face the table
+                return "right"
+
+            else:
+                # Phase 2: face up toward Pokeball at (6,3) and press A
+                # Alternate up (to face table) and A (to interact)
+                if self._lab_turns % 2 == 0:
+                    return "up"
+                return "a"
+
+        # In Oak's Lab with a Pokemon: alternate A/down to advance scripted
+        # sequence while moving south (away from bookshelf/table).
+        if state.map_id == 40 and state.party_count > 0:
+            if self.turn_count % 3 == 0:
+                return "down"
             return "a"
 
         direction = self.navigator.next_direction(
@@ -523,11 +580,14 @@ class PokemonAgent:
         path.write_text("\n".join(lines))
         self.log(f"POKEDEX | Wrote {path}")
 
-    def take_screenshot(self):
+    def take_screenshot(self, label: str = "", force: bool = False):
         """Save current frame as turn{N}.png."""
-        if not self.screenshots or Image is None:
+        if not force and not self.screenshots:
             return
-        path = self.frames_dir / f"turn{self.turn_count}.png"
+        if Image is None:
+            return
+        suffix = f"_{label}" if label else ""
+        path = self.frames_dir / f"turn{self.turn_count}{suffix}.png"
         img = Image.fromarray(self.pyboy.screen.ndarray)
         img.save(path)
         self.log(f"SCREENSHOT | {path}")
@@ -585,10 +645,59 @@ class PokemonAgent:
             self.collision_map.update(self.pyboy)
         except Exception:
             pass  # game_wrapper may not be available in all contexts
+
+        # Diagnostic: capture screen and collision data at key positions
+        if state.map_id == 37 and not hasattr(self, '_house_diag_done'):
+            self._house_diag_done = True
+            self.take_screenshot("house_1f", force=True)
+            self.log(f"DIAG | House 1F at ({state.x},{state.y}) collision map:")
+            self.log(self.collision_map.to_ascii())
+
+        if state.map_id == 0 and state.y <= 3 and state.party_count == 0:
+            # Log game state near the Oak trigger zone
+            wd730 = self.memory._read(0xD730)
+            wd74b = self.memory._read(0xD74B)
+            cur_script = self.memory._read(0xD625)
+            if self.turn_count % 5 == 0:
+                self.log(
+                    f"DIAG | Pallet y={state.y} x={state.x} "
+                    f"wd730=0x{wd730:02X} wd74b=0x{wd74b:02X} script={cur_script}"
+                )
+            if not hasattr(self, '_pallet_diag_done'):
+                self._pallet_diag_done = True
+                self.take_screenshot("pallet_north", force=True)
+
+            # At y<=1, Oak's PalletTownScript0 triggers. Stop movement and
+            # wait for Oak to walk to the player, then mash A through dialogue.
+            if state.y <= 1:
+                if not hasattr(self, '_oak_wait_done'):
+                    self._oak_wait_done = True
+                    self.log(f"OAK TRIGGER | At y={state.y} x={state.x}. Waiting for Oak script...")
+                    self.take_screenshot("oak_trigger", force=True)
+                    # Wait for Oak to walk from Route 1 to the player (~600 frames)
+                    self.controller.wait(600)
+                    # Oak's lab intro has multiple scripted walking + dialogue phases:
+                    # 1. Oak escorts player to lab (walk script ~300 frames)
+                    # 2. Oak talks about research (several text boxes)
+                    # 3. Oak walks to Pokeball table (walk script ~200 frames)
+                    # 4. Oak says "choose a Pokemon" (text boxes)
+                    # Alternate mashing A and waiting for walk scripts.
+                    for _ in range(4):
+                        self.controller.mash_a(30, delay=30)
+                        self.controller.wait(300)
+                    s = self.memory.read_overworld_state()
+                    wd730 = self.memory._read(0xD730)
+                    self.log(f"OAK TRIGGER | After wait: map={s.map_id} ({s.x},{s.y}) "
+                             f"party={s.party_count} wd730=0x{wd730:02X}")
+                    self.take_screenshot("oak_after_wait", force=True)
+
         action = self.choose_overworld_action(state)
 
         if action in {"up", "down", "left", "right"}:
             self.controller.move(action)
+        elif action == "b":
+            self.controller.press("b", hold_frames=20, release_frames=12)
+            self.controller.wait(24)
         else:
             self.controller.press("a", hold_frames=20, release_frames=12)
             self.controller.wait(24)
@@ -633,6 +742,14 @@ class PokemonAgent:
             self.controller.wait(30)  # Longer waits for text to scroll
 
         self.log("Intro complete. Entering game loop.")
+
+        # Diagnostic: capture game state right after intro
+        intro_state = self.memory.read_overworld_state()
+        self.take_screenshot("post_intro", force=True)
+        wd730 = self.memory._read(0xD730)
+        wd74b = self.memory._read(0xD74B)
+        self.log(f"DIAG | Post-intro: map={intro_state.map_id} pos=({intro_state.x},{intro_state.y}) "
+                 f"party={intro_state.party_count} wd730=0x{wd730:02X} wd74b=0x{wd74b:02X}")
 
         for _ in range(max_turns):
             battle = self.memory.read_battle_state()

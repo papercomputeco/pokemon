@@ -4,10 +4,10 @@
   "0": {
     "name": "Pallet Town",
     "waypoints": [
-      {"x": 5, "y": 10, "note": "South of houses, center path"},
-      {"x": 5, "y": 4, "note": "North through gap between houses"},
-      {"x": 4, "y": 2, "note": "Approach tall grass / north exit"},
-      {"x": 4, "y": 0, "note": "Exit north to Route 1"}
+      {"x": 8, "y": 10, "note": "Center path between houses"},
+      {"x": 10, "y": 4, "note": "North through gap — x=10 is the walkable corridor"},
+      {"x": 10, "y": 2, "note": "Approach north tree line"},
+      {"x": 10, "y": 1, "note": "Oak trigger tile — only x=10 is open at y=1"}
     ]
   },
 

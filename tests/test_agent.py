@@ -354,13 +354,18 @@ class TestNavigator:
 
     # -- _direction_toward_target --
 
-    def test_direction_at_target_returns_cardinal(self):
-        """When at target, horizontal=None, vertical=None, but the cardinal
-        directions loop still fills ordered with all 4 directions."""
+    def test_direction_at_target_returns_none(self):
+        """When at target with stuck < 8, no fallback directions are added."""
         nav = Navigator({})
         state = OverworldState(x=5, y=5)
         result = nav._direction_toward_target(state, 5, 5)
-        # ordered = [up, right, down, left] from the for loop on line 243
+        assert result is None
+
+    def test_direction_at_target_stuck_returns_cardinal(self):
+        """When at target but stuck >= 8, fallback directions are added."""
+        nav = Navigator({})
+        state = OverworldState(x=5, y=5)
+        result = nav._direction_toward_target(state, 5, 5, stuck_turns=8)
         assert result == "up"
 
     def test_direction_toward_target_empty_ordered(self):
@@ -1195,7 +1200,8 @@ class TestModuleConstants:
     def test_early_game_targets_has_keys(self):
         assert 38 in EARLY_GAME_TARGETS
         assert 37 in EARLY_GAME_TARGETS
-        assert 0 in EARLY_GAME_TARGETS
+        # Map 0 (Pallet Town) uses waypoints instead of EARLY_GAME_TARGETS
+        assert 0 not in EARLY_GAME_TARGETS
 
     def test_move_data_has_entries(self):
         assert 0x01 in MOVE_DATA
