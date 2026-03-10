@@ -73,6 +73,43 @@ tapes checkout <hash>   # restore a previous conversation state
 
 Session data lives in `.tapes/` (gitignored).
 
+## Observational Memory
+
+Claude Code writes conversation tapes (JSONL) for every session but never reads them back. The observational memory system closes that loop: it reads tapes, extracts noteworthy events via heuristic pattern matching (no LLM calls), and writes prioritized observations to memory files that persist across sessions.
+
+```
+~/.claude/projects/<project>/
+├── *.jsonl                  # conversation tapes (one per session)
+└── memory/
+    ├── observations.md      # date-grouped observations with priority tags
+    └── observer_state.json  # watermark tracking processed sessions
+```
+
+**What it extracts:**
+- Session goals (first user message)
+- Tool errors and exception tracebacks
+- Files created during the session
+- Subagent dispatch counts
+- Token usage summaries
+
+Each observation is tagged `[important]`, `[possible]`, or `[informational]` based on keyword matching (e.g. bug/error/crash are important, test/refactor are possible).
+
+```bash
+# Preview observations without writing
+python3 scripts/observe_cli.py --dry-run
+
+# Process all unprocessed sessions
+python3 scripts/observe_cli.py
+
+# Reprocess everything from scratch
+python3 scripts/observe_cli.py --reset
+
+# Process a single session
+python3 scripts/observe_cli.py --session <session-id>
+```
+
+The observer auto-detects the project directory from cwd. Override with `--project-dir`.
+
 ## Project Structure
 
 ```
@@ -86,7 +123,10 @@ pokemon-agent/
 ├── scripts/
 │   ├── install.sh           # setup: Python, PyBoy, Tapes
 │   ├── agent.py             # main agent loop + strategies
-│   └── memory_reader.py     # memory address definitions
+│   ├── memory_reader.py     # memory address definitions
+│   ├── tape_reader.py       # JSONL tape parser (stdlib only)
+│   ├── observer.py          # heuristic observation extractor
+│   └── observe_cli.py       # CLI for running the observer
 ├── references/
 │   ├── routes.json          # overworld waypoints
 │   └── type_chart.json      # type effectiveness data
