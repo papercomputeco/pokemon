@@ -1292,12 +1292,12 @@ class TestNavigatorCollisionGrid:
     def test_with_collision_grid_early_game_offscreen_falls_back(self):
         """Early game target offscreen falls back to _direction_toward_target."""
         nav = Navigator({})
-        # Map 0 = Pallet Town, target (5, 1)
-        # Player at (5, 20) -> screen target = (4 + (1-20), 4 + (5-5)) = (-15, 4) -> offscreen
-        state = OverworldState(map_id=0, x=5, y=20)
+        # Map 38 = Red's bedroom, target (7, 1)
+        # Player at (3, 20) -> screen target = (4 + (1-20), 4 + (7-3)) = (-15, 8) -> offscreen
+        state = OverworldState(map_id=38, x=3, y=20)
         grid = self._open_grid()
         result = nav.next_direction(state, collision_grid=grid)
-        assert result == "up"  # y-axis preference for Pallet Town is "x" but y needed
+        assert result == "right"  # axis "x" for Red's bedroom, x=3 -> x=7
 
     def test_with_collision_grid_early_game_astar_failure_falls_back(self):
         """Early game A* failure falls back to _direction_toward_target."""

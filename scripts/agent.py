@@ -44,7 +44,7 @@ ROUTES_PATH = SCRIPT_DIR.parent / "references" / "routes.json"
 EARLY_GAME_TARGETS = {
     38: {"name": "Red's bedroom", "target": (7, 1), "axis": "x"},
     37: {"name": "Red's house 1F", "target": (2, 7), "axis": "y"},
-    0: {"name": "Pallet Town", "target": (5, 1), "axis": "x"},
+    0: {"name": "Pallet Town (pre-Oak)", "target": (4, 0), "axis": "y"},
 }
 
 # Move ID → (name, type, power, accuracy)
@@ -235,6 +235,13 @@ class Navigator:
             vertical = "up"
 
         ordered: list[str] = []
+
+        # When very stuck (5+), try perpendicular directions first to break free
+        if stuck_turns >= 5:
+            perpendicular = [horizontal, vertical] if axis_preference == "y" else [vertical, horizontal]
+            for direction in perpendicular:
+                self._add_direction(ordered, direction)
+
         primary = [horizontal, vertical] if axis_preference == "x" else [vertical, horizontal]
         secondary = [vertical, horizontal] if axis_preference == "x" else [horizontal, vertical]
 
@@ -269,6 +276,9 @@ class Navigator:
             self.current_waypoint = 0
 
         special_target = EARLY_GAME_TARGETS.get(state.map_id)
+        # Map 0 early-game target only applies before getting a Pokemon
+        if state.map_id == 0 and state.party_count > 0:
+            special_target = None
         if special_target:
             target_x, target_y = special_target["target"]
             if collision_grid is not None:
@@ -299,6 +309,12 @@ class Navigator:
         if state.x == tx and state.y == ty:
             self.current_waypoint += 1
             return self.next_direction(state, turn=turn, stuck_turns=stuck_turns, collision_grid=collision_grid)
+
+        # Skip waypoint if close enough but stuck too long
+        dist = abs(state.x - tx) + abs(state.y - ty)
+        if stuck_turns >= 8 and dist <= 3 and self.current_waypoint < len(waypoints) - 1:
+            self.current_waypoint += 1
+            return self.next_direction(state, turn=turn, stuck_turns=0, collision_grid=collision_grid)
 
         if collision_grid is not None:
             astar_dir = self._try_astar(state, tx, ty, collision_grid)
@@ -362,6 +378,7 @@ class PokemonAgent:
         self.maps_visited: set[int] = set()
         self.events: list[str] = []
         self.collision_map = CollisionMap()
+        self.door_cooldown: int = 0  # Steps to walk away from door after exiting a building
 
         # Screenshot output directory
         self.frames_dir = SCRIPT_DIR.parent / "frames"
@@ -397,8 +414,12 @@ class PokemonAgent:
             self.stuck_turns = 0
             self.recent_positions.clear()
             self.recent_positions.append(pos)
+            # Set door cooldown when exiting interior maps to avoid re-entry
+            prev = self.last_overworld_state.map_id
+            if prev in (37, 38, 40) and state.map_id == 0:
+                self.door_cooldown = 5
             self.log(
-                f"MAP CHANGE | {self.last_overworld_state.map_id} -> {state.map_id} | "
+                f"MAP CHANGE | {prev} -> {state.map_id} | "
                 f"Pos: ({state.x}, {state.y})"
             )
             return
@@ -414,16 +435,28 @@ class PokemonAgent:
         if len(self.recent_positions) > 8:
             self.recent_positions.pop(0)
 
-        if self.stuck_turns in {2, 5, 10}:
+        if self.stuck_turns in {2, 5, 10, 20}:
             self.log(
                 f"STUCK | Map: {state.map_id} | Pos: ({state.x}, {state.y}) | "
                 f"Last move: {self.last_overworld_action} | Streak: {self.stuck_turns}"
             )
 
+        # Milestone detection
+        if state.map_id == 1 and state.map_id not in self.maps_visited:
+            self.log("MILESTONE | Reached Viridian City!")
+
     def choose_overworld_action(self, state: OverworldState) -> str:
         """Pick the next overworld action."""
         if state.text_box_active:
             return "a"
+
+        # After exiting a building, wait frames to let scripts settle then walk south
+        if self.door_cooldown > 0:
+            self.door_cooldown -= 1
+            if self.door_cooldown >= 3:
+                self.controller.wait(60)  # let game scripts complete
+                return "a"  # dismiss any dialogue
+            return "down"  # walk south away from door
 
         # After Oak escorts the player into the lab, stay in interaction mode
         # until the scripted intro there finishes.
@@ -560,15 +593,24 @@ class PokemonAgent:
             self.controller.press("a", hold_frames=20, release_frames=12)
             self.controller.wait(24)
 
-        # Log position every 100 steps
-        if self.turn_count % 100 == 0:
+        # Log position every 50 steps (or every 10 on map 0 for debugging)
+        log_interval = 10 if state.map_id == 0 else 50
+        if self.turn_count % log_interval == 0:
+            wp_info = ""
+            map_key = str(state.map_id)
+            if map_key in self.navigator.routes:
+                route = self.navigator.routes[map_key]
+                waypoints = route["waypoints"] if isinstance(route, dict) and "waypoints" in route else route
+                if self.navigator.current_waypoint < len(waypoints):
+                    wp = waypoints[self.navigator.current_waypoint]
+                    wp_info = f" | WP: {self.navigator.current_waypoint}→({wp['x']},{wp['y']})"
             self.log(
                 f"OVERWORLD | Map: {state.map_id} | "
                 f"Pos: ({state.x}, {state.y}) | "
                 f"Badges: {state.badges} | "
                 f"Party: {state.party_count} | "
                 f"Action: {action} | "
-                f"Stuck: {self.stuck_turns}"
+                f"Stuck: {self.stuck_turns}{wp_info}"
             )
 
         self.last_overworld_state = state
