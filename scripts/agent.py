@@ -27,7 +27,8 @@ try:
 except ImportError:
     Image = None
 
-from memory_reader import MemoryReader, BattleState, OverworldState
+from memory_reader import MemoryReader, BattleState, OverworldState, CollisionMap
+from pathfinding import astar_path
 
 # ---------------------------------------------------------------------------
 # Type chart (simplified — super effective multipliers)
@@ -247,7 +248,17 @@ class Navigator:
             return None
         return ordered[stuck_turns % len(ordered)]
 
-    def next_direction(self, state: OverworldState, turn: int = 0, stuck_turns: int = 0) -> str | None:
+    def _try_astar(self, state: OverworldState, target_x: int, target_y: int, collision_grid: list) -> str | None:
+        """Try A* pathfinding to target. Returns first direction or None."""
+        screen_target_row = 4 + (target_y - state.y)
+        screen_target_col = 4 + (target_x - state.x)
+        if 0 <= screen_target_row < 9 and 0 <= screen_target_col < 10:
+            result = astar_path(collision_grid, (4, 4), (screen_target_row, screen_target_col))
+            if result["status"] in ("success", "partial") and result["directions"]:
+                return result["directions"][0]
+        return None
+
+    def next_direction(self, state: OverworldState, turn: int = 0, stuck_turns: int = 0, collision_grid: list | None = None) -> str | None:
         """Get the next direction to move based on current position and route plan."""
         map_key = str(state.map_id)
 
@@ -259,6 +270,10 @@ class Navigator:
         special_target = EARLY_GAME_TARGETS.get(state.map_id)
         if special_target:
             target_x, target_y = special_target["target"]
+            if collision_grid is not None:
+                astar_dir = self._try_astar(state, target_x, target_y, collision_grid)
+                if astar_dir is not None:
+                    return astar_dir
             return self._direction_toward_target(
                 state,
                 target_x,
@@ -282,7 +297,12 @@ class Navigator:
 
         if state.x == tx and state.y == ty:
             self.current_waypoint += 1
-            return self.next_direction(state, turn=turn, stuck_turns=stuck_turns)
+            return self.next_direction(state, turn=turn, stuck_turns=stuck_turns, collision_grid=collision_grid)
+
+        if collision_grid is not None:
+            astar_dir = self._try_astar(state, tx, ty, collision_grid)
+            if astar_dir is not None:
+                return astar_dir
 
         return self._direction_toward_target(state, tx, ty, stuck_turns=stuck_turns)
 
@@ -310,6 +330,7 @@ class PokemonAgent:
         self.recent_positions: list[tuple[int, int, int]] = []
         self.maps_visited: set[int] = set()
         self.events: list[str] = []
+        self.collision_map = CollisionMap()
 
         # Screenshot output directory
         self.frames_dir = SCRIPT_DIR.parent / "frames"
@@ -382,6 +403,7 @@ class PokemonAgent:
             state,
             turn=self.turn_count,
             stuck_turns=self.stuck_turns,
+            collision_grid=self.collision_map.grid,
         )
         return direction or "a"
 
@@ -495,6 +517,10 @@ class PokemonAgent:
         """Move in the overworld."""
         state = self.memory.read_overworld_state()
         self.update_overworld_progress(state)
+        try:
+            self.collision_map.update(self.pyboy)
+        except Exception:
+            pass  # game_wrapper may not be available in all contexts
         action = self.choose_overworld_action(state)
 
         if action in {"up", "down", "left", "right"}:
