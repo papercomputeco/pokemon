@@ -824,6 +824,37 @@ class TestBacktrackIntegration:
         assert not hasattr(ag, '_pallet_diag_done')
         assert not hasattr(ag, '_house_diag_done')
 
+    def test_backtrack_skipped_in_oaks_lab(self, tmp_path):
+        """Backtrack should NOT trigger in Oak's Lab (map 40) at all."""
+        ag = _make_agent(tmp_path)
+        ag.backtrack.restore_threshold = 1
+        state = OverworldState(map_id=40, party_count=0, x=5, y=3)
+        ag.memory.read_overworld_state = MagicMock(return_value=state)
+        ag.backtrack.save_snapshot(ag.pyboy, state, turn=0)
+        ag._bt_last_map_id = 40
+        ag.stuck_turns = 5  # well above threshold
+
+        with patch.object(agent, "Image", None):
+            ag.run_overworld()
+
+        # Should NOT have restored despite being stuck
+        assert ag.backtrack.total_restores == 0
+
+    def test_backtrack_skipped_in_oaks_lab_with_party(self, tmp_path):
+        """Backtrack should NOT trigger in Oak's Lab even after getting Pokemon."""
+        ag = _make_agent(tmp_path)
+        ag.backtrack.restore_threshold = 1
+        state = OverworldState(map_id=40, party_count=1, x=7, y=5)
+        ag.memory.read_overworld_state = MagicMock(return_value=state)
+        ag.backtrack.save_snapshot(ag.pyboy, state, turn=0)
+        ag._bt_last_map_id = 40
+        ag.stuck_turns = 5
+
+        with patch.object(agent, "Image", None):
+            ag.run_overworld()
+
+        assert ag.backtrack.total_restores == 0
+
     def test_periodic_snapshot_skips_duplicate_position(self, tmp_path):
         ag = _make_agent(tmp_path)
         ag._bt_snapshot_interval = 1  # every turn
@@ -1915,7 +1946,7 @@ class TestOaksLabPhases:
     """Cover lab phases 0->1->2 with no Pokemon and lab with Pokemon."""
 
     def test_lab_phase0_y_ge_4_transitions_to_phase1(self, tmp_path):
-        """Lines 493-496: phase 0, y>=4 -> transition to phase 1, return 'right'."""
+        """Phase 0, y>=4 -> transition to phase 1, return 'right'."""
         ag = _make_agent(tmp_path)
         with patch.object(agent, "Image", None):
             state = OverworldState(map_id=40, party_count=0, x=3, y=4)
@@ -1925,7 +1956,7 @@ class TestOaksLabPhases:
         assert any("phase 0" in e for e in ag.events)
 
     def test_lab_phase0_odd_turn_returns_b(self, tmp_path):
-        """Lines 497-498: phase 0, _lab_turns odd -> return 'b'."""
+        """Phase 0, _lab_turns odd -> return 'b'."""
         ag = _make_agent(tmp_path)
         ag._lab_turns = 0  # will be incremented to 1 (odd)
         ag._lab_phase = 0
@@ -1935,7 +1966,7 @@ class TestOaksLabPhases:
         assert result == "b"
 
     def test_lab_phase0_even_turn_returns_down(self, tmp_path):
-        """Lines 498-499: phase 0, _lab_turns even -> return 'down'."""
+        """Phase 0, _lab_turns even -> return 'down'."""
         ag = _make_agent(tmp_path)
         ag._lab_turns = 1  # will be incremented to 2 (even)
         ag._lab_phase = 0
@@ -1945,7 +1976,7 @@ class TestOaksLabPhases:
         assert result == "down"
 
     def test_lab_phase1_x_ge_6_transitions_to_phase2(self, tmp_path):
-        """Lines 503-506: phase 1, x>=6 -> transition to phase 2, return 'up'."""
+        """Phase 1, x>=6 -> transition to phase 2, return 'up'."""
         ag = _make_agent(tmp_path)
         ag._lab_phase = 1
         ag._lab_turns = 0
@@ -1957,7 +1988,7 @@ class TestOaksLabPhases:
         assert any("phase 1" in e for e in ag.events)
 
     def test_lab_phase1_x_lt_6_returns_right(self, tmp_path):
-        """Line 507: phase 1, x<6 -> return 'right'."""
+        """Phase 1, x<6 -> return 'right'."""
         ag = _make_agent(tmp_path)
         ag._lab_phase = 1
         ag._lab_turns = 0
@@ -1967,7 +1998,7 @@ class TestOaksLabPhases:
         assert result == "right"
 
     def test_lab_phase2_even_turn_returns_up(self, tmp_path):
-        """Lines 512-513: phase 2, _lab_turns even -> return 'up'."""
+        """Phase 2, _lab_turns even -> return 'up'."""
         ag = _make_agent(tmp_path)
         ag._lab_phase = 2
         ag._lab_turns = 1  # incremented to 2 (even)
@@ -1977,7 +2008,7 @@ class TestOaksLabPhases:
         assert result == "up"
 
     def test_lab_phase2_odd_turn_returns_a(self, tmp_path):
-        """Line 514: phase 2, _lab_turns odd -> return 'a'."""
+        """Phase 2, _lab_turns odd -> return 'a'."""
         ag = _make_agent(tmp_path)
         ag._lab_phase = 2
         ag._lab_turns = 0  # incremented to 1 (odd)
@@ -2108,7 +2139,9 @@ class TestRunOverworldOakTrigger:
         ag = _make_agent(tmp_path)
         state = OverworldState(map_id=0, x=5, y=1, party_count=0)
         post_wait_state = OverworldState(map_id=40, x=5, y=3, party_count=0)
-        ag.memory.read_overworld_state = MagicMock(side_effect=[state, post_wait_state])
+        # read_overworld_state called: (1) top of run_overworld, (2) inside oak trigger
+        ag.memory.read_overworld_state = MagicMock(
+            side_effect=[state, post_wait_state])
         ag.controller = MagicMock()
         ag.collision_map = MagicMock()
         ag.collision_map.grid = [[1] * 10 for _ in range(9)]
@@ -2120,10 +2153,14 @@ class TestRunOverworldOakTrigger:
         assert hasattr(ag, '_oak_wait_done')
         assert ag._oak_wait_done is True
         assert any("OAK TRIGGER" in e for e in ag.events)
-        # Should have called wait(600) for Oak walk
+        # Should have called wait(600) for initial Oak walk
         ag.controller.wait.assert_any_call(600)
-        # Should have called mash_a 4 times
+        # 4 rounds of mash_a(30) + wait(300)
         assert ag.controller.mash_a.call_count == 4
+        for c in ag.controller.mash_a.call_args_list:
+            assert c == call(30, delay=30)
+        wait_300_calls = [c for c in ag.controller.wait.call_args_list if c == call(300)]
+        assert len(wait_300_calls) == 4
 
     def test_oak_wait_only_once(self, tmp_path):
         """Lines 673: _oak_wait_done already set -> skip Oak sequence."""
@@ -2184,6 +2221,30 @@ class TestRunOverworldBButton:
         ag.controller.press.assert_called_once_with("b", hold_frames=20, release_frames=12)
         ag.controller.wait.assert_called_once_with(24)
         assert ag.last_overworld_action == "b"
+
+
+# ===================================================================
+# run_overworld -- Wait action dispatch
+# ===================================================================
+
+
+class TestRunOverworldWaitAction:
+    """Cover action == 'wait' -> controller.wait() with no button press."""
+
+    def test_wait_action_just_waits(self, tmp_path):
+        ag = _make_agent(tmp_path)
+        state = OverworldState(map_id=40, x=5, y=3)
+        ag.memory.read_overworld_state = MagicMock(return_value=state)
+        ag.choose_overworld_action = MagicMock(return_value="wait")
+        ag.controller = MagicMock()
+        ag.turn_count = 1
+
+        ag.run_overworld()
+
+        ag.controller.wait.assert_called_once_with(30)
+        ag.controller.press.assert_not_called()
+        ag.controller.move.assert_not_called()
+        assert ag.last_overworld_action == "wait"
 
 
 # ===================================================================

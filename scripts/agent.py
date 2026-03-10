@@ -560,29 +560,28 @@ class PokemonAgent:
             return "left"  # sidestep to avoid door on return north
 
         # In Oak's lab with no Pokemon: walk to Pokeball table and pick one.
-        # Oak stands near (5,2) blocking north. Pressing A near him loops
-        # his dialogue. Going too far south triggers "Don't go away!"
-        # Strategy: A to dismiss text, down 1 to dodge Oak, right, up to table.
+        # Oak's Lab script (0xD5F1) tracks the cutscene state but we don't
+        # gate on it — the phases below handle all states by pressing B to
+        # dismiss dialogue and navigating to the Pokeball table.
+        # Pokeball sprites at (6,3)=Charmander, (7,3)=Squirtle, (8,3)=Bulbasaur.
+        # Interact from y=4 facing UP.
         if state.map_id == 40 and state.party_count == 0:
             lab_script = self.memory._read(0xD5F1)
+            if not hasattr(self, '_lab_turns'):
+                self._lab_turns = 0
+            self._lab_turns += 1
+
             if self.turn_count % 50 == 0:
                 self.log(f"LAB | script={lab_script} pos=({state.x},{state.y}) "
                          f"turn={self.turn_count}")
                 if self.turn_count % 200 == 0:
                     self.take_screenshot(f"lab_t{self.turn_count}", force=True)
 
-            if not hasattr(self, '_lab_turns'):
-                self._lab_turns = 0
-            self._lab_turns += 1
-
-            # Pokeball sprites are at (6,3), (7,3), (8,3) ON the table.
-            # Interact from y=4 facing UP, or y=2 facing DOWN.
-            # Simplest path: B(clear) → down to y=4 → right to x=6 → up+A
             if not hasattr(self, '_lab_phase'):
                 self._lab_phase = 0
 
             if self._lab_phase == 0:
-                # Dismiss Oak's text with B, then move south
+                # Dismiss text with B, move south to y=4 (interaction row)
                 if state.y >= 4:
                     self._lab_phase = 1
                     self.log(f"LAB | phase 0→1 south at ({state.x},{state.y})")
@@ -592,16 +591,15 @@ class PokemonAgent:
                 return "down"
 
             elif self._lab_phase == 1:
-                # Go east to Pokeball column (x=6 = Charmander)
+                # Move east to x=6 (Charmander's Pokeball column)
                 if state.x >= 6:
                     self._lab_phase = 2
                     self.log(f"LAB | phase 1→2 at pokeball column ({state.x},{state.y})")
-                    return "up"  # face the table
+                    return "up"
                 return "right"
 
             else:
-                # Phase 2: face up toward Pokeball at (6,3) and press A
-                # Alternate up (to face table) and A (to interact)
+                # Phase 2: at Pokeball — face up and press A to interact
                 if self._lab_turns % 2 == 0:
                     return "up"
                 return "a"
@@ -759,14 +757,21 @@ class PokemonAgent:
             pass  # game_wrapper may not be available in all contexts
 
         # --- FLE backtracking ---
-        # Snapshot on map change
-        if self._bt_last_map_id is not None and state.map_id != self._bt_last_map_id:
-            self.backtrack.save_snapshot(self.pyboy, state, self.turn_count)
+        # Skip all backtracking while in Oak's Lab (map 40).
+        # The lab has multiple scripted sequences (picking starter, rival battle)
+        # that look "stuck" but are progressing.  Restoring mid-sequence
+        # undoes progress even after the player picks up a Pokemon.
+        in_oaks_lab = (state.map_id == 40)
+
+        # Snapshot on map change (skip in Oak's Lab)
+        if not in_oaks_lab:
+            if self._bt_last_map_id is not None and state.map_id != self._bt_last_map_id:
+                self.backtrack.save_snapshot(self.pyboy, state, self.turn_count)
         self._bt_last_map_id = state.map_id
 
-        # Periodic snapshot when making progress (not stuck, and position
-        # differs from last snapshot to avoid poisoning the pool)
-        if (self._bt_snapshot_interval > 0
+        # Periodic snapshot when making progress (skip in Oak's Lab)
+        if (not in_oaks_lab
+                and self._bt_snapshot_interval > 0
                 and self.turn_count > 0
                 and self.turn_count % self._bt_snapshot_interval == 0
                 and self.stuck_turns == 0):
@@ -777,8 +782,8 @@ class PokemonAgent:
                     or last_snap.y != state.y):
                 self.backtrack.save_snapshot(self.pyboy, state, self.turn_count)
 
-        # Restore when stuck too long
-        if self.backtrack.should_restore(self.stuck_turns):
+        # Restore when stuck too long (skip in Oak's Lab)
+        if not in_oaks_lab and self.backtrack.should_restore(self.stuck_turns):
             snap = self.backtrack.restore(self.pyboy)
             if snap is not None:
                 self.stuck_turns = 0
@@ -843,7 +848,9 @@ class PokemonAgent:
 
         action = self.choose_overworld_action(state)
 
-        if action in {"up", "down", "left", "right"}:
+        if action == "wait":
+            self.controller.wait(30)
+        elif action in {"up", "down", "left", "right"}:
             self.controller.move(action)
         elif action == "b":
             self.controller.press("b", hold_frames=20, release_frames=12)
