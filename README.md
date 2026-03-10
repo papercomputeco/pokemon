@@ -144,6 +144,8 @@ The two approaches complement each other. Long sessions are better for discoveri
 ```
 pokemon-agent/
 ├── README.md                # this file
+├── LICENSE                  # MIT license
+├── CONTRIBUTING.md          # contributor guide
 ├── SKILL.md                 # skill definition for stereOS agents
 ├── jcard.toml               # stereOS VM configuration
 ├── .tapes/                  # Tapes telemetry DB + config (gitignored)
@@ -153,6 +155,7 @@ pokemon-agent/
 │   ├── install.sh           # setup: Python, PyBoy, Tapes
 │   ├── agent.py             # main agent loop + strategies
 │   ├── memory_reader.py     # memory address definitions
+│   ├── memory_file.py       # agent memory management
 │   ├── tape_reader.py       # Tapes SQLite reader (stdlib only)
 │   ├── observer.py          # heuristic observation extractor
 │   ├── observe_cli.py       # CLI for running the observer
@@ -162,8 +165,9 @@ pokemon-agent/
 ├── references/
 │   ├── routes.json          # overworld waypoints
 │   └── type_chart.json      # type effectiveness data
-└── pokedex/
-    └── log1.md              # session log: stereOS setup notes
+├── pokedex/
+│   └── log1.md              # session log: stereOS setup notes
+└── tests/                   # 100% coverage test suite
 ```
 
 ## Pokedex
