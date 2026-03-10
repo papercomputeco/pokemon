@@ -1,7 +1,7 @@
-"""Observational memory: distills tape sessions into prioritized observations.
+"""Observational memory: distills Tapes sessions into prioritized observations.
 
 Uses heuristic pattern matching (no LLM calls) to extract noteworthy events
-from Claude Code conversation tapes and write them to memory files.
+from Tapes conversation data and write them to memory files.
 """
 
 import json
@@ -36,12 +36,12 @@ _POSSIBLE_KEYWORDS = re.compile(
 
 
 class Observer:
-    """Extracts observations from tape sessions using heuristics."""
+    """Extracts observations from Tapes sessions using heuristics."""
 
-    def __init__(self, project_dir: str, memory_dir: str):
-        self.project_dir = Path(project_dir)
+    def __init__(self, db_path: str, memory_dir: str):
+        self.db_path = Path(db_path)
         self.memory_dir = Path(memory_dir)
-        self.reader = TapeReader(project_dir)
+        self.reader = TapeReader(db_path)
         self.state_path = self.memory_dir / "observer_state.json"
         self.observations_path = self.memory_dir / "observations.md"
 
@@ -121,7 +121,7 @@ class Observer:
                         )
                     )
 
-        # 3. Discovery patterns: new files created, bug fixes mentioned
+        # 3. Discovery patterns: new files created
         for entry in session.entries:
             for tool in entry.tool_uses:
                 if tool.name == "Write" and tool.input_summary:
@@ -135,20 +135,7 @@ class Observer:
                         )
                     )
 
-        # 4. Decision patterns: subagent dispatches
-        subagent_count = len(session.subagent_sessions)
-        if subagent_count > 0:
-            observations.append(
-                Observation(
-                    timestamp=now,
-                    referenced_time=session.start_time,
-                    priority="informational",
-                    content=f"Dispatched {subagent_count} subagent(s)",
-                    source_session=session.session_id,
-                )
-            )
-
-        # 5. Context: token usage summary
+        # 4. Context: token usage summary
         total_input = 0
         total_output = 0
         total_cache_read = 0
@@ -204,11 +191,10 @@ class Observer:
         lines: list[str] = []
         for date in sorted(by_date.keys()):
             header = f"## {date}"
-            # Only add header if not already in existing content
             if header not in existing:
                 lines.append(f"\n{header}\n")
             else:
-                lines.append("")  # blank separator
+                lines.append("")
 
             for obs in by_date[date]:
                 lines.append(
@@ -216,7 +202,6 @@ class Observer:
                     f"(session: {obs.source_session[:8]})"
                 )
 
-        # Append to file
         with open(self.observations_path, "a") as f:
             f.write("\n".join(lines) + "\n")
 
@@ -247,7 +232,6 @@ def _has_traceback(text: str) -> bool:
 
 def _extract_traceback_summary(text: str) -> str:
     """Extract a short summary from traceback text."""
-    # Find the last line that looks like an error
     for line in reversed(text.splitlines()):
         line = line.strip()
         if line and ("Error:" in line or "Exception:" in line):

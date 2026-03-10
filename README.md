@@ -75,14 +75,13 @@ Session data lives in `.tapes/` (gitignored).
 
 ## Observational Memory
 
-The project has two telemetry sources: **Tapes** (tapes.dev) records LLM API calls in a SQLite database at `.tapes/tapes.sqlite`, while **Claude Code** writes conversation session logs as JSONL files at `~/.claude/projects/<project>/`. The observational memory system reads the Claude Code JSONL sessions, extracts noteworthy events via heuristic pattern matching (no LLM calls), and writes prioritized observations to memory files.
+Inspired by [Mastra's observational memory](https://mastra.ai/blog/observational-memory), this system reads the [Tapes](https://tapes.dev) SQLite database, extracts noteworthy events via heuristic pattern matching (no LLM calls), and writes prioritized observations to memory files.
+
+Tapes records every LLM conversation as a content-addressable DAG of nodes in `.tapes/tapes.sqlite`. The observer walks these conversation chains, identifies patterns (errors, file creations, token usage), and writes observations alongside the database.
 
 ```
 .tapes/
-└── tapes.sqlite             # Tapes telemetry: nodes, embeddings, facets
-
-~/.claude/projects/<project>/
-├── *.jsonl                  # Claude Code session logs (one per session)
+├── tapes.sqlite             # Tapes DB: nodes, embeddings, facets
 └── memory/
     ├── observations.md      # date-grouped observations with priority tags
     └── observer_state.json  # watermark tracking processed sessions
@@ -92,7 +91,6 @@ The project has two telemetry sources: **Tapes** (tapes.dev) records LLM API cal
 - Session goals (first user message)
 - Tool errors and exception tracebacks
 - Files created during the session
-- Subagent dispatch counts
 - Token usage summaries
 
 Each observation is tagged `[important]`, `[possible]`, or `[informational]` based on keyword matching (e.g. bug/error/crash are important, test/refactor are possible).
@@ -107,11 +105,11 @@ python3 scripts/observe_cli.py
 # Reprocess everything from scratch
 python3 scripts/observe_cli.py --reset
 
-# Process a single session
-python3 scripts/observe_cli.py --session <session-id>
+# Process a single session by root node hash
+python3 scripts/observe_cli.py --session <hash>
 ```
 
-The observer auto-detects the project directory from cwd. Override with `--project-dir`.
+Auto-detects `.tapes/tapes.sqlite` from cwd. Override with `--db`.
 
 ## Project Structure
 

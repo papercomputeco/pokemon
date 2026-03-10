@@ -1,6 +1,7 @@
 """Tests for tape_reader.py — 100% coverage."""
 
 import json
+import sqlite3
 
 import pytest
 
@@ -8,12 +9,48 @@ from tape_reader import (
     TapeEntry,
     TapeReader,
     TapeSession,
-    SubagentSession,
     ToolUse,
     ToolResult,
     TokenUsage,
     _summarize_tool_input,
+    _parse_content_blob,
 )
+
+
+def _create_db(path):
+    """Create a tapes.sqlite with the nodes schema."""
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        "CREATE TABLE nodes ("
+        "  hash TEXT PRIMARY KEY,"
+        "  role TEXT,"
+        "  content JSON,"
+        "  created_at DATETIME,"
+        "  prompt_tokens INTEGER,"
+        "  completion_tokens INTEGER,"
+        "  cache_creation_input_tokens INTEGER,"
+        "  cache_read_input_tokens INTEGER,"
+        "  parent_hash TEXT,"
+        "  model TEXT,"
+        "  agent_name TEXT"
+        ")"
+    )
+    conn.commit()
+    return conn
+
+
+def _insert_node(conn, hash_val, role="user", content=None, created_at="2026-03-09T10:00:00Z",
+                 prompt_tokens=None, completion_tokens=None, cache_creation=None,
+                 cache_read=None, parent_hash=None, model=None, agent_name=None):
+    """Insert a node into the test database."""
+    content_json = json.dumps(content) if content is not None else None
+    conn.execute(
+        "INSERT INTO nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (hash_val, role, content_json, created_at,
+         prompt_tokens, completion_tokens, cache_creation, cache_read,
+         parent_hash, model, agent_name),
+    )
+    conn.commit()
 
 
 # ── Dataclass defaults ──────────────────────────────────────────────
@@ -63,232 +100,177 @@ class TestTokenUsage:
         assert u.cache_read == 0
 
 
-class TestSubagentSession:
-    def test_defaults(self):
-        s = SubagentSession()
-        assert s.agent_id == ""
-        assert s.entries == []
-
-
 class TestTapeSession:
     def test_defaults(self):
         s = TapeSession()
         assert s.session_id == ""
         assert s.entries == []
-        assert s.subagent_sessions == []
         assert s.start_time == ""
         assert s.end_time == ""
 
 
-# ── parse_entry ──────────────────────────────────────────────────────
+# ── _parse_content_blob ──────────────────────────────────────────────
 
 
-class TestParseEntry:
-    def test_user_text_message(self, make_tape_entry):
-        line = make_tape_entry(entry_type="user", text="do something")
-        entry = TapeReader.parse_entry(line)
+class TestParseContentBlob:
+    def test_none(self):
+        assert _parse_content_blob(None) == []
+
+    def test_valid_json_list(self):
+        blob = json.dumps([{"type": "text", "text": "hi"}])
+        result = _parse_content_blob(blob)
+        assert len(result) == 1
+        assert result[0]["text"] == "hi"
+
+    def test_filters_non_dicts(self):
+        blob = json.dumps(["string", {"type": "text"}, 42])
+        result = _parse_content_blob(blob)
+        assert len(result) == 1
+
+    def test_invalid_json(self):
+        assert _parse_content_blob("not json{") == []
+
+    def test_non_list_json(self):
+        blob = json.dumps({"key": "value"})
+        assert _parse_content_blob(blob) == []
+
+    def test_bytes_input(self):
+        blob = json.dumps([{"type": "text"}]).encode()
+        result = _parse_content_blob(blob)
+        assert len(result) == 1
+
+
+# ── _row_to_entry ────────────────────────────────────────────────────
+
+
+class TestRowToEntry:
+    def _make_reader(self, tmp_path):
+        db_path = tmp_path / "tapes.sqlite"
+        _create_db(db_path)
+        return TapeReader(str(db_path))
+
+    def test_user_text_message(self, tmp_path):
+        db_path = tmp_path / "tapes.sqlite"
+        conn = _create_db(db_path)
+        _insert_node(conn, "h1", role="user",
+                      content=[{"type": "text", "text": "do something"}])
+
+        reader = TapeReader(str(db_path))
+        session = reader.read_session("h1")
+        assert len(session.entries) == 1
+        entry = session.entries[0]
         assert entry.type == "user"
         assert entry.text_content == "do something"
-        assert entry.session_id == "test-session-001"
-        assert entry.timestamp == "2026-03-09T10:00:00.000Z"
 
-    def test_user_with_tool_results(self, make_tape_entry):
-        line = make_tape_entry(
-            entry_type="user",
-            text="",
-            tool_results=[
-                {
-                    "tool_use_id": "tu-abc",
-                    "content": "file contents here",
-                    "is_error": False,
-                },
-            ],
-        )
-        entry = TapeReader.parse_entry(line)
-        assert len(entry.tool_results) == 1
-        assert entry.tool_results[0].tool_use_id == "tu-abc"
-        assert entry.tool_results[0].content_summary == "file contents here"
-        assert entry.tool_results[0].is_error is False
+    def test_assistant_with_tool_use(self, tmp_path):
+        db_path = tmp_path / "tapes.sqlite"
+        conn = _create_db(db_path)
+        _insert_node(conn, "h1", role="assistant",
+                      content=[
+                          {"type": "text", "text": "Let me read that."},
+                          {"type": "tool_use", "tool_use_id": "tu-1",
+                           "tool_name": "Read",
+                           "tool_input": {"file_path": "/foo.py"}},
+                      ],
+                      prompt_tokens=1000, completion_tokens=200,
+                      cache_creation=50, cache_read=800)
 
-    def test_user_with_error_tool_result(self, make_tape_entry):
-        line = make_tape_entry(
-            entry_type="user",
-            text="",
-            tool_results=[
-                {
-                    "tool_use_id": "tu-err",
-                    "content": "command failed",
-                    "is_error": True,
-                },
-            ],
-        )
-        entry = TapeReader.parse_entry(line)
-        assert entry.tool_results[0].is_error is True
-
-    def test_user_tool_result_with_list_content(self):
-        """Tool result content can be a list of text blocks."""
-        raw = {
-            "type": "user",
-            "sessionId": "s1",
-            "timestamp": "2026-01-01T00:00:00Z",
-            "message": {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "tool_result",
-                        "tool_use_id": "tu-1",
-                        "content": [
-                            {"type": "text", "text": "line 1"},
-                            {"type": "text", "text": "line 2"},
-                        ],
-                    }
-                ],
-            },
-        }
-        entry = TapeReader.parse_entry(json.dumps(raw))
-        assert entry.tool_results[0].content_summary == "line 1\nline 2"
-
-    def test_system_entry(self, make_tape_entry):
-        line = make_tape_entry(
-            entry_type="system", system_content="session started"
-        )
-        entry = TapeReader.parse_entry(line)
-        assert entry.type == "system"
-        assert entry.text_content == "session started"
-
-    def test_system_entry_with_message_content(self):
-        """System entry where content comes from message.content."""
-        raw = {
-            "type": "system",
-            "sessionId": "s1",
-            "timestamp": "2026-01-01T00:00:00Z",
-            "message": {"content": "from message"},
-        }
-        entry = TapeReader.parse_entry(json.dumps(raw))
-        assert entry.text_content == "from message"
-
-    def test_progress_entry(self, make_tape_entry):
-        line = make_tape_entry(entry_type="progress")
-        entry = TapeReader.parse_entry(line)
-        assert entry.type == "progress"
-        assert entry.text_content == ""
-
-    def test_unknown_type(self):
-        raw = {
-            "type": "file-history-snapshot",
-            "snapshot": {},
-        }
-        entry = TapeReader.parse_entry(json.dumps(raw))
-        assert entry.type == "file-history-snapshot"
-
-    def test_string_message(self):
-        """Some entries have message as a plain string."""
-        raw = {
-            "type": "user",
-            "sessionId": "s1",
-            "timestamp": "2026-01-01T00:00:00Z",
-            "message": "plain text message",
-        }
-        entry = TapeReader.parse_entry(json.dumps(raw))
-        assert entry.text_content == "plain text message"
-
-    def test_user_with_string_content(self):
-        """User message where content is a string, not list."""
-        raw = {
-            "type": "user",
-            "sessionId": "s1",
-            "timestamp": "2026-01-01T00:00:00Z",
-            "message": {"role": "user", "content": "just a string"},
-        }
-        entry = TapeReader.parse_entry(json.dumps(raw))
-        assert entry.text_content == "just a string"
-
-    def test_no_message_field(self):
-        raw = {"type": "progress", "timestamp": "2026-01-01T00:00:00Z"}
-        entry = TapeReader.parse_entry(json.dumps(raw))
-        assert entry.text_content == ""
-
-    def test_content_list_with_non_dict_items(self):
-        """Content list with non-dict items should be skipped."""
-        raw = {
-            "type": "user",
-            "sessionId": "s1",
-            "timestamp": "2026-01-01T00:00:00Z",
-            "message": {"role": "user", "content": ["string item", 42]},
-        }
-        entry = TapeReader.parse_entry(json.dumps(raw))
-        assert entry.text_content == ""
-
-
-class TestParseEntryAssistant:
-    def test_text_block(self, make_tape_entry):
-        line = make_tape_entry(entry_type="assistant", text="I'll help you")
-        entry = TapeReader.parse_entry(line)
-        assert entry.type == "assistant"
-        assert entry.text_content == "I'll help you"
-
-    def test_tool_use_block(self, make_tape_entry):
-        line = make_tape_entry(
-            entry_type="assistant",
-            text="Let me read that file.",
-            tool_uses=[
-                {"id": "tu-1", "name": "Read", "input": {"file_path": "/foo.py"}},
-            ],
-        )
-        entry = TapeReader.parse_entry(line)
+        reader = TapeReader(str(db_path))
+        session = reader.read_session("h1")
+        entry = session.entries[0]
+        assert entry.text_content == "Let me read that."
         assert len(entry.tool_uses) == 1
         assert entry.tool_uses[0].name == "Read"
         assert entry.tool_uses[0].input_summary == "/foo.py"
-
-    def test_multiple_tool_uses(self, make_tape_entry):
-        line = make_tape_entry(
-            entry_type="assistant",
-            text="",
-            tool_uses=[
-                {"id": "tu-1", "name": "Bash", "input": {"command": "ls"}},
-                {"id": "tu-2", "name": "Grep", "input": {"pattern": "TODO"}},
-            ],
-        )
-        entry = TapeReader.parse_entry(line)
-        assert len(entry.tool_uses) == 2
-        assert entry.tool_uses[0].input_summary == "ls"
-        assert entry.tool_uses[1].input_summary == "pattern=TODO"
-
-    def test_usage_extraction(self, make_tape_entry):
-        line = make_tape_entry(
-            entry_type="assistant",
-            text="done",
-            usage={
-                "input_tokens": 1000,
-                "output_tokens": 200,
-                "cache_creation_input_tokens": 50,
-                "cache_read_input_tokens": 800,
-            },
-        )
-        entry = TapeReader.parse_entry(line)
         assert entry.token_usage.input_tokens == 1000
-        assert entry.token_usage.output_tokens == 200
-        assert entry.token_usage.cache_creation == 50
         assert entry.token_usage.cache_read == 800
 
-    def test_no_usage(self, make_tape_entry):
-        line = make_tape_entry(entry_type="assistant", text="ok")
-        entry = TapeReader.parse_entry(line)
-        assert entry.token_usage.input_tokens == 0
+    def test_user_with_tool_result(self, tmp_path):
+        db_path = tmp_path / "tapes.sqlite"
+        conn = _create_db(db_path)
+        _insert_node(conn, "h1", role="user",
+                      content=[
+                          {"type": "tool_result", "tool_use_id": "tu-1",
+                           "content": "file contents", "is_error": False},
+                      ])
 
-    def test_content_with_non_dict_items(self):
-        """Assistant content list with non-dict items should be skipped."""
-        raw = {
-            "type": "assistant",
-            "sessionId": "s1",
-            "timestamp": "2026-01-01T00:00:00Z",
-            "message": {
-                "role": "assistant",
-                "content": ["string item", {"type": "text", "text": "real text"}],
-            },
-        }
-        entry = TapeReader.parse_entry(json.dumps(raw))
-        assert entry.text_content == "real text"
+        reader = TapeReader(str(db_path))
+        session = reader.read_session("h1")
+        entry = session.entries[0]
+        assert len(entry.tool_results) == 1
+        assert entry.tool_results[0].content_summary == "file contents"
+        assert entry.tool_results[0].is_error is False
+
+    def test_user_with_error_tool_result(self, tmp_path):
+        db_path = tmp_path / "tapes.sqlite"
+        conn = _create_db(db_path)
+        _insert_node(conn, "h1", role="user",
+                      content=[
+                          {"type": "tool_result", "tool_use_id": "tu-1",
+                           "content": "command failed", "is_error": True},
+                      ])
+
+        reader = TapeReader(str(db_path))
+        entry = reader.read_session("h1").entries[0]
+        assert entry.tool_results[0].is_error is True
+
+    def test_tool_result_with_list_content(self, tmp_path):
+        db_path = tmp_path / "tapes.sqlite"
+        conn = _create_db(db_path)
+        _insert_node(conn, "h1", role="user",
+                      content=[
+                          {"type": "tool_result", "tool_use_id": "tu-1",
+                           "content": [
+                               {"type": "text", "text": "line 1"},
+                               {"type": "text", "text": "line 2"},
+                           ]},
+                      ])
+
+        reader = TapeReader(str(db_path))
+        entry = reader.read_session("h1").entries[0]
+        assert entry.tool_results[0].content_summary == "line 1\nline 2"
+
+    def test_empty_role_node(self, tmp_path):
+        db_path = tmp_path / "tapes.sqlite"
+        conn = _create_db(db_path)
+        _insert_node(conn, "h1", role="", content=[])
+
+        reader = TapeReader(str(db_path))
+        entry = reader.read_session("h1").entries[0]
+        assert entry.type == ""
+        assert entry.text_content == ""
+
+    def test_null_role_node(self, tmp_path):
+        db_path = tmp_path / "tapes.sqlite"
+        conn = _create_db(db_path)
+        _insert_node(conn, "h1", role=None, content=None)
+
+        reader = TapeReader(str(db_path))
+        entry = reader.read_session("h1").entries[0]
+        assert entry.type == ""
+
+    def test_null_tokens(self, tmp_path):
+        db_path = tmp_path / "tapes.sqlite"
+        conn = _create_db(db_path)
+        _insert_node(conn, "h1", role="assistant", content=[{"type": "text", "text": "hi"}])
+
+        reader = TapeReader(str(db_path))
+        entry = reader.read_session("h1").entries[0]
+        assert entry.token_usage.input_tokens == 0
+        assert entry.token_usage.output_tokens == 0
+
+    def test_raw_dict_populated(self, tmp_path):
+        db_path = tmp_path / "tapes.sqlite"
+        conn = _create_db(db_path)
+        _insert_node(conn, "h1", role="user", content=[], model="claude-opus-4-6",
+                      agent_name="claude", parent_hash="h0")
+
+        reader = TapeReader(str(db_path))
+        entry = reader.read_session("h1").entries[0]
+        assert entry.raw["hash"] == "h1"
+        assert entry.raw["model"] == "claude-opus-4-6"
+        assert entry.raw["agent_name"] == "claude"
+        assert entry.raw["parent_hash"] == "h0"
 
 
 # ── _summarize_tool_input ────────────────────────────────────────────
@@ -332,7 +314,6 @@ class TestSummarizeToolInput:
         assert result == "just a string"
 
     def test_generic_key_priority(self):
-        """Generic summary checks keys in order: prompt, query, description..."""
         result = _summarize_tool_input(
             "Custom", {"description": "desc", "prompt": "p"}
         )
@@ -343,94 +324,88 @@ class TestSummarizeToolInput:
 
 
 class TestTapeReaderListSessions:
-    def test_empty_dir(self, tmp_path):
-        reader = TapeReader(str(tmp_path))
+    def test_empty_db(self, tmp_path):
+        db_path = tmp_path / "tapes.sqlite"
+        _create_db(db_path)
+        reader = TapeReader(str(db_path))
         assert reader.list_sessions() == []
 
-    def test_finds_jsonl_files(self, tmp_path):
-        (tmp_path / "abc-123.jsonl").write_text("{}\n")
-        (tmp_path / "def-456.jsonl").write_text("{}\n")
-        (tmp_path / "not-jsonl.txt").write_text("x")
-        reader = TapeReader(str(tmp_path))
-        sessions = reader.list_sessions()
-        assert len(sessions) == 2
-        assert "abc-123" in sessions
-        assert "def-456" in sessions
+    def test_finds_root_nodes(self, tmp_path):
+        db_path = tmp_path / "tapes.sqlite"
+        conn = _create_db(db_path)
+        _insert_node(conn, "root1", role="user", content=[], created_at="2026-01-01T00:00:00Z")
+        _insert_node(conn, "child1", role="assistant", content=[], parent_hash="root1",
+                      created_at="2026-01-01T00:01:00Z")
+        _insert_node(conn, "root2", role="user", content=[], created_at="2026-01-02T00:00:00Z")
 
-    def test_sorted_order(self, tmp_path):
-        (tmp_path / "bbb.jsonl").write_text("{}\n")
-        (tmp_path / "aaa.jsonl").write_text("{}\n")
-        reader = TapeReader(str(tmp_path))
-        assert reader.list_sessions() == ["aaa", "bbb"]
+        reader = TapeReader(str(db_path))
+        sessions = reader.list_sessions()
+        assert sessions == ["root1", "root2"]
+
+    def test_ordered_by_time(self, tmp_path):
+        db_path = tmp_path / "tapes.sqlite"
+        conn = _create_db(db_path)
+        _insert_node(conn, "later", role="user", content=[], created_at="2026-01-02T00:00:00Z")
+        _insert_node(conn, "earlier", role="user", content=[], created_at="2026-01-01T00:00:00Z")
+
+        reader = TapeReader(str(db_path))
+        assert reader.list_sessions() == ["earlier", "later"]
 
 
 class TestTapeReaderReadSession:
-    def test_basic_session(self, tmp_path, make_tape_entry):
-        lines = [
-            make_tape_entry(entry_type="user", text="hi", timestamp="2026-01-01T00:00:00Z"),
-            make_tape_entry(entry_type="assistant", text="hello", timestamp="2026-01-01T00:01:00Z"),
-        ]
-        (tmp_path / "sess1.jsonl").write_text("\n".join(lines) + "\n")
+    def test_basic_chain(self, tmp_path):
+        db_path = tmp_path / "tapes.sqlite"
+        conn = _create_db(db_path)
+        _insert_node(conn, "h1", role="user",
+                      content=[{"type": "text", "text": "hi"}],
+                      created_at="2026-01-01T00:00:00Z")
+        _insert_node(conn, "h2", role="assistant",
+                      content=[{"type": "text", "text": "hello"}],
+                      created_at="2026-01-01T00:01:00Z",
+                      parent_hash="h1")
 
-        reader = TapeReader(str(tmp_path))
-        session = reader.read_session("sess1")
-        assert session.session_id == "sess1"
+        reader = TapeReader(str(db_path))
+        session = reader.read_session("h1")
+        assert session.session_id == "h1"
         assert len(session.entries) == 2
         assert session.start_time == "2026-01-01T00:00:00Z"
         assert session.end_time == "2026-01-01T00:01:00Z"
 
-    def test_subagent_separation(self, tmp_path, make_tape_entry):
-        lines = [
-            make_tape_entry(entry_type="user", text="hi"),
-            make_tape_entry(entry_type="assistant", text="main reply"),
-            make_tape_entry(
-                entry_type="assistant",
-                text="subagent reply",
-                parent_tool_use_id="tu-agent-1",
-            ),
-            make_tape_entry(
-                entry_type="user",
-                text="subagent input",
-                parent_tool_use_id="tu-agent-1",
-            ),
-        ]
-        (tmp_path / "s2.jsonl").write_text("\n".join(lines) + "\n")
+    def test_single_node_session(self, tmp_path):
+        db_path = tmp_path / "tapes.sqlite"
+        conn = _create_db(db_path)
+        _insert_node(conn, "h1", role="user", content=[{"type": "text", "text": "solo"}])
 
-        reader = TapeReader(str(tmp_path))
-        session = reader.read_session("s2")
-        assert len(session.entries) == 2  # main entries only
-        assert len(session.subagent_sessions) == 1
-        assert session.subagent_sessions[0].agent_id == "tu-agent-1"
-        assert len(session.subagent_sessions[0].entries) == 2
+        reader = TapeReader(str(db_path))
+        session = reader.read_session("h1")
+        assert len(session.entries) == 1
+        assert session.start_time == session.end_time
 
     def test_empty_session(self, tmp_path):
-        (tmp_path / "empty.jsonl").write_text("")
-        reader = TapeReader(str(tmp_path))
-        session = reader.read_session("empty")
+        """Reading a hash that doesn't exist returns empty session."""
+        db_path = tmp_path / "tapes.sqlite"
+        _create_db(db_path)
+        reader = TapeReader(str(db_path))
+        session = reader.read_session("nonexistent")
         assert session.entries == []
-        assert session.start_time == ""
-        assert session.end_time == ""
-
-    def test_entries_without_timestamps(self, tmp_path):
-        """Entries without timestamps shouldn't set time bounds."""
-        raw = json.dumps({"type": "file-history-snapshot", "snapshot": {}})
-        (tmp_path / "no-ts.jsonl").write_text(raw + "\n")
-        reader = TapeReader(str(tmp_path))
-        session = reader.read_session("no-ts")
         assert session.start_time == ""
         assert session.end_time == ""
 
 
 class TestTapeReaderIterEntries:
-    def test_generator_behavior(self, tmp_path, make_tape_entry):
-        lines = [
-            make_tape_entry(entry_type="user", text="line1"),
-            make_tape_entry(entry_type="assistant", text="line2"),
-        ]
-        (tmp_path / "gen.jsonl").write_text("\n".join(lines) + "\n")
+    def test_generator_behavior(self, tmp_path):
+        db_path = tmp_path / "tapes.sqlite"
+        conn = _create_db(db_path)
+        _insert_node(conn, "h1", role="user",
+                      content=[{"type": "text", "text": "line1"}],
+                      created_at="2026-01-01T00:00:00Z")
+        _insert_node(conn, "h2", role="assistant",
+                      content=[{"type": "text", "text": "line2"}],
+                      created_at="2026-01-01T00:01:00Z",
+                      parent_hash="h1")
 
-        reader = TapeReader(str(tmp_path))
-        gen = reader.iter_entries("gen")
+        reader = TapeReader(str(db_path))
+        gen = reader.iter_entries("h1")
         first = next(gen)
         assert first.text_content == "line1"
         second = next(gen)
@@ -438,9 +413,9 @@ class TestTapeReaderIterEntries:
         with pytest.raises(StopIteration):
             next(gen)
 
-    def test_skips_blank_lines(self, tmp_path, make_tape_entry):
-        content = make_tape_entry(entry_type="user", text="only") + "\n\n\n"
-        (tmp_path / "blanks.jsonl").write_text(content)
-        reader = TapeReader(str(tmp_path))
-        entries = list(reader.iter_entries("blanks"))
-        assert len(entries) == 1
+    def test_empty_chain(self, tmp_path):
+        db_path = tmp_path / "tapes.sqlite"
+        _create_db(db_path)
+        reader = TapeReader(str(db_path))
+        entries = list(reader.iter_entries("nonexistent"))
+        assert entries == []

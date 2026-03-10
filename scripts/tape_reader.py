@@ -1,11 +1,11 @@
-"""Reader for Claude Code JSONL tape files.
+"""Reader for Tapes SQLite database.
 
-Parses session tapes into structured Python objects for analysis.
-Pure stdlib — no external dependencies.
+Parses conversation nodes from tapes.sqlite into structured Python objects
+for analysis. Pure stdlib — no external dependencies beyond sqlite3.
 """
 
 import json
-import glob
+import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Generator
@@ -41,7 +41,7 @@ class TokenUsage:
 
 @dataclass
 class TapeEntry:
-    """Single parsed line from a JSONL tape."""
+    """Single parsed node from the Tapes database."""
 
     type: str = ""
     timestamp: str = ""
@@ -54,163 +54,176 @@ class TapeEntry:
 
 
 @dataclass
-class SubagentSession:
-    """A subagent's tape entries, grouped by tool_use_id."""
-
-    agent_id: str = ""
-    entries: list[TapeEntry] = field(default_factory=list)
-
-
-@dataclass
 class TapeSession:
-    """A fully parsed tape session."""
+    """A conversation thread traced through parent_hash chains."""
 
     session_id: str = ""
     entries: list[TapeEntry] = field(default_factory=list)
-    subagent_sessions: list[SubagentSession] = field(default_factory=list)
     start_time: str = ""
     end_time: str = ""
 
 
 class TapeReader:
-    """Reads and parses Claude Code JSONL tape files."""
+    """Reads and parses the Tapes SQLite database."""
 
-    def __init__(self, project_dir: str):
-        self.project_dir = Path(project_dir)
+    def __init__(self, db_path: str):
+        self.db_path = Path(db_path)
 
     def list_sessions(self) -> list[str]:
-        """Return session IDs from *.jsonl files in project_dir."""
-        pattern = str(self.project_dir / "*.jsonl")
-        paths = glob.glob(pattern)
-        return [Path(p).stem for p in sorted(paths)]
+        """Return hashes of root nodes (conversation starts) ordered by time."""
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            rows = conn.execute(
+                "SELECT hash FROM nodes "
+                "WHERE parent_hash IS NULL "
+                "ORDER BY created_at"
+            ).fetchall()
+            return [r[0] for r in rows]
+        finally:
+            conn.close()
 
-    def read_session(self, session_id: str) -> TapeSession:
-        """Parse a full session file into a TapeSession."""
-        entries = list(self.iter_entries(session_id))
-        session = TapeSession(session_id=session_id, entries=[])
+    def read_session(self, root_hash: str) -> TapeSession:
+        """Walk the parent_hash chain from a root node into a TapeSession."""
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            rows = conn.execute(
+                "WITH RECURSIVE chain(h) AS ("
+                "  SELECT ? "
+                "  UNION ALL "
+                "  SELECT n.hash FROM nodes n "
+                "  JOIN chain ON n.parent_hash = chain.h"
+                ") "
+                "SELECT n.hash, n.role, n.content, n.created_at, "
+                "  n.prompt_tokens, n.completion_tokens, "
+                "  n.cache_creation_input_tokens, n.cache_read_input_tokens, "
+                "  n.parent_hash, n.model, n.agent_name "
+                "FROM chain JOIN nodes n ON n.hash = chain.h "
+                "ORDER BY n.created_at",
+                (root_hash,),
+            ).fetchall()
+        finally:
+            conn.close()
 
-        # Separate main session entries from subagent entries
-        subagent_map: dict[str, list[TapeEntry]] = {}
-        for entry in entries:
-            parent_tool_id = entry.raw.get("parentToolUseID")
-            if parent_tool_id:
-                subagent_map.setdefault(parent_tool_id, []).append(entry)
-            else:
-                session.entries.append(entry)
-
-        # Build subagent sessions
-        for agent_id, sub_entries in subagent_map.items():
-            session.subagent_sessions.append(
-                SubagentSession(agent_id=agent_id, entries=sub_entries)
-            )
-
-        # Set time bounds from entries with timestamps
-        timestamped = [e for e in entries if e.timestamp]
-        if timestamped:
-            session.start_time = timestamped[0].timestamp
-            session.end_time = timestamped[-1].timestamp
-
+        entries = [self._row_to_entry(row) for row in rows]
+        session = TapeSession(
+            session_id=root_hash,
+            entries=entries,
+        )
+        if entries:
+            session.start_time = entries[0].timestamp
+            session.end_time = entries[-1].timestamp
         return session
 
-    def iter_entries(self, session_id: str) -> Generator[TapeEntry, None, None]:
-        """Lazy line-by-line generator over tape entries."""
-        path = self.project_dir / f"{session_id}.jsonl"
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if line:
-                    yield self.parse_entry(line)
+    def iter_entries(self, root_hash: str) -> Generator[TapeEntry, None, None]:
+        """Lazy generator over entries in a conversation chain."""
+        conn = sqlite3.connect(str(self.db_path))
+        try:
+            cursor = conn.execute(
+                "WITH RECURSIVE chain(h) AS ("
+                "  SELECT ? "
+                "  UNION ALL "
+                "  SELECT n.hash FROM nodes n "
+                "  JOIN chain ON n.parent_hash = chain.h"
+                ") "
+                "SELECT n.hash, n.role, n.content, n.created_at, "
+                "  n.prompt_tokens, n.completion_tokens, "
+                "  n.cache_creation_input_tokens, n.cache_read_input_tokens, "
+                "  n.parent_hash, n.model, n.agent_name "
+                "FROM chain JOIN nodes n ON n.hash = chain.h "
+                "ORDER BY n.created_at",
+                (root_hash,),
+            )
+            for row in cursor:
+                yield self._row_to_entry(row)
+        finally:
+            conn.close()
 
-    @staticmethod
-    def parse_entry(line: str) -> TapeEntry:
-        """Parse one JSONL line into a TapeEntry."""
-        raw = json.loads(line)
+    def _row_to_entry(self, row: tuple) -> TapeEntry:
+        """Convert a database row into a TapeEntry."""
+        (
+            hash_val, role, content_blob, created_at,
+            prompt_tokens, completion_tokens,
+            cache_creation, cache_read,
+            parent_hash, model, agent_name,
+        ) = row
+
+        role = role or ""
+        content = _parse_content_blob(content_blob)
+
         entry = TapeEntry(
-            type=raw.get("type", ""),
-            timestamp=raw.get("timestamp", ""),
-            session_id=raw.get("sessionId", ""),
-            raw=raw,
+            type=role,
+            timestamp=created_at or "",
+            session_id=hash_val or "",
+            raw={
+                "hash": hash_val,
+                "role": role,
+                "parent_hash": parent_hash,
+                "model": model,
+                "agent_name": agent_name,
+            },
         )
 
-        msg = raw.get("message", {})
-        if not isinstance(msg, dict):
-            # Some user entries have string messages
-            if isinstance(msg, str):
-                entry.text_content = msg
-            return entry
-
-        content = msg.get("content", [])
-
-        if raw.get("type") == "assistant":
-            # Extract usage
-            usage = msg.get("usage", {})
+        if role == "assistant":
             entry.token_usage = TokenUsage(
-                input_tokens=usage.get("input_tokens", 0),
-                output_tokens=usage.get("output_tokens", 0),
-                cache_creation=usage.get("cache_creation_input_tokens", 0),
-                cache_read=usage.get("cache_read_input_tokens", 0),
+                input_tokens=prompt_tokens or 0,
+                output_tokens=completion_tokens or 0,
+                cache_creation=cache_creation or 0,
+                cache_read=cache_read or 0,
             )
-
-            # Extract text and tool_use blocks
-            if isinstance(content, list):
-                texts = []
-                for block in content:
-                    if not isinstance(block, dict):
-                        continue
-                    if block.get("type") == "text":
-                        texts.append(block.get("text", ""))
-                    elif block.get("type") == "tool_use":
-                        tool_input = block.get("input", {})
-                        summary = _summarize_tool_input(
-                            block.get("name", ""), tool_input
+            texts = []
+            for block in content:
+                if block.get("type") == "text":
+                    texts.append(block.get("text", ""))
+                elif block.get("type") == "tool_use":
+                    tool_input = block.get("tool_input", {})
+                    name = block.get("tool_name", "")
+                    summary = _summarize_tool_input(name, tool_input)
+                    entry.tool_uses.append(
+                        ToolUse(
+                            id=block.get("tool_use_id", ""),
+                            name=name,
+                            input_summary=summary,
                         )
-                        entry.tool_uses.append(
-                            ToolUse(
-                                id=block.get("id", ""),
-                                name=block.get("name", ""),
-                                input_summary=summary,
-                            )
-                        )
-                entry.text_content = "\n".join(texts)
+                    )
+            entry.text_content = "\n".join(texts)
 
-        elif raw.get("type") == "user":
-            # User messages can have text content or tool_result blocks
-            if isinstance(content, str):
-                entry.text_content = content
-            elif isinstance(content, list):
-                texts = []
-                for block in content:
-                    if not isinstance(block, dict):
-                        continue
-                    if block.get("type") == "text":
-                        texts.append(block.get("text", ""))
-                    elif block.get("type") == "tool_result":
-                        result_content = block.get("content", "")
-                        if isinstance(result_content, list):
-                            parts = [
-                                p.get("text", "")
-                                for p in result_content
-                                if isinstance(p, dict)
-                            ]
-                            result_content = "\n".join(parts)
-                        entry.tool_results.append(
-                            ToolResult(
-                                tool_use_id=block.get("tool_use_id", ""),
-                                content_summary=result_content[:500],
-                                is_error=bool(block.get("is_error", False)),
-                            )
+        elif role == "user":
+            texts = []
+            for block in content:
+                if block.get("type") == "text":
+                    texts.append(block.get("text", ""))
+                elif block.get("type") == "tool_result":
+                    result_content = block.get("content", "")
+                    if isinstance(result_content, list):
+                        parts = [
+                            p.get("text", "")
+                            for p in result_content
+                            if isinstance(p, dict)
+                        ]
+                        result_content = "\n".join(parts)
+                    entry.tool_results.append(
+                        ToolResult(
+                            tool_use_id=block.get("tool_use_id", ""),
+                            content_summary=str(result_content)[:500],
+                            is_error=bool(block.get("is_error", False)),
                         )
-                entry.text_content = "\n".join(texts)
-
-        elif raw.get("type") == "system":
-            # System messages have content at top level or in message.content
-            system_content = raw.get("content", "")
-            if isinstance(system_content, str) and system_content:
-                entry.text_content = system_content
-            elif isinstance(content, str):
-                entry.text_content = content
+                    )
+            entry.text_content = "\n".join(texts)
 
         return entry
+
+
+def _parse_content_blob(blob) -> list[dict]:
+    """Parse the content column (JSON blob or None) into a list of blocks."""
+    if blob is None:
+        return []
+    try:
+        parsed = json.loads(blob) if isinstance(blob, (str, bytes)) else blob
+    except (json.JSONDecodeError, TypeError):
+        return []
+    if isinstance(parsed, list):
+        return [b for b in parsed if isinstance(b, dict)]
+    return []
 
 
 def _summarize_tool_input(name: str, tool_input: dict) -> str:
@@ -234,7 +247,6 @@ def _summarize_tool_input(name: str, tool_input: dict) -> str:
     elif name == "Agent":
         return tool_input.get("description", "")[:200]
     else:
-        # Generic: show first key=value
         for key in ("prompt", "query", "description", "command", "file_path"):
             if key in tool_input:
                 return f"{key}={str(tool_input[key])[:200]}"

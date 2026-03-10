@@ -1,36 +1,37 @@
 """CLI wrapper for the observational memory observer.
 
 Usage:
-    python3 scripts/observe_cli.py [--project-dir DIR] [--dry-run] [--session ID] [--reset]
+    python3 scripts/observe_cli.py [--db PATH] [--memory-dir DIR] [--dry-run] [--session HASH] [--reset]
 """
 
 import argparse
 import os
-import sys
 from pathlib import Path
 
 from observer import Observer
 
 
-def detect_project_dir() -> str:
-    """Auto-detect Claude project dir from cwd.
+def detect_db_path() -> str:
+    """Auto-detect tapes.sqlite from .tapes/ in the current working directory."""
+    return str(Path(os.getcwd()) / ".tapes" / "tapes.sqlite")
 
-    Converts /Users/x/code/pokemon -> ~/.claude/projects/-Users-x-code-pokemon/
-    """
-    cwd = os.getcwd()
-    slug = cwd.replace("/", "-")
-    if slug.startswith("-"):
-        slug = slug  # keep leading dash
-    return str(Path.home() / ".claude" / "projects" / slug)
+
+def detect_memory_dir() -> str:
+    """Default memory directory alongside the tapes database."""
+    return str(Path(os.getcwd()) / ".tapes" / "memory")
 
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
-        description="Distill Claude Code tapes into observational memory"
+        description="Distill Tapes sessions into observational memory"
     )
     parser.add_argument(
-        "--project-dir",
-        help="Override auto-detected Claude project directory",
+        "--db",
+        help="Path to tapes.sqlite (default: .tapes/tapes.sqlite)",
+    )
+    parser.add_argument(
+        "--memory-dir",
+        help="Directory for observations output (default: .tapes/memory/)",
     )
     parser.add_argument(
         "--dry-run",
@@ -39,7 +40,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--session",
-        help="Process a single session ID only",
+        help="Process a single session (root node hash) only",
     )
     parser.add_argument(
         "--reset",
@@ -49,10 +50,10 @@ def main(argv: list[str] | None = None) -> None:
 
     args = parser.parse_args(argv)
 
-    project_dir = args.project_dir or detect_project_dir()
-    memory_dir = str(Path(project_dir) / "memory")
+    db_path = args.db or detect_db_path()
+    memory_dir = args.memory_dir or detect_memory_dir()
 
-    observer = Observer(project_dir=project_dir, memory_dir=memory_dir)
+    observer = Observer(db_path=db_path, memory_dir=memory_dir)
 
     if args.reset:
         if observer.state_path.exists():
@@ -64,7 +65,6 @@ def main(argv: list[str] | None = None) -> None:
         observations = observer.observe_session(session)
     else:
         if args.dry_run:
-            # In dry-run mode, get unprocessed and observe without writing
             sessions = observer.get_unprocessed_sessions()
             observations = []
             for sid in sessions:
