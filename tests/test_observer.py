@@ -8,6 +8,7 @@ from tape_helpers import create_test_db, insert_test_node
 from observer import (
     Observation,
     Observer,
+    observe_session_inline,
     _first_user_message,
     _has_traceback,
     _extract_traceback_summary,
@@ -616,3 +617,64 @@ class TestRun:
         results = obs.run()
         assert results == []
         assert not (mem / "observations.md").exists()
+
+
+# ── observe_session_inline() ──────────────────────────────────────────
+
+
+class TestObserveSessionInline:
+    def test_returns_dicts(self, tmp_path):
+        db_path = tmp_path / "tapes.sqlite"
+        conn = create_test_db(db_path)
+        insert_test_node(conn, "root1", role="user",
+                      content=[{"type": "text", "text": "fix the crash"}],
+                      created_at="2026-03-09T10:00:00Z")
+        insert_test_node(conn, "reply1", role="assistant",
+                      content=[{"type": "text", "text": "I see the error"}],
+                      created_at="2026-03-09T10:01:00Z",
+                      parent_hash="root1",
+                      prompt_tokens=500, completion_tokens=100,
+                      cache_read=400)
+
+        results = observe_session_inline(str(db_path), "root1")
+        assert isinstance(results, list)
+        assert len(results) > 0
+        assert all("priority" in r and "content" in r for r in results)
+        goals = [r for r in results if "Session goal" in r["content"]]
+        assert len(goals) == 1
+
+    def test_latest_session_when_no_id(self, tmp_path):
+        db_path = tmp_path / "tapes.sqlite"
+        conn = create_test_db(db_path)
+        insert_test_node(conn, "aaa", role="user",
+                      content=[{"type": "text", "text": "hello"}],
+                      created_at="2026-03-09T10:00:00Z")
+        insert_test_node(conn, "bbb", role="user",
+                      content=[{"type": "text", "text": "world"}],
+                      created_at="2026-03-09T11:00:00Z")
+
+        results = observe_session_inline(str(db_path))
+        # Should use the latest session (bbb)
+        assert isinstance(results, list)
+        assert len(results) > 0
+
+    def test_empty_db_returns_empty(self, tmp_path):
+        db_path = tmp_path / "tapes.sqlite"
+        create_test_db(db_path)
+        results = observe_session_inline(str(db_path))
+        assert results == []
+
+    def test_includes_error_observations(self, tmp_path):
+        db_path = tmp_path / "tapes.sqlite"
+        conn = create_test_db(db_path)
+        insert_test_node(conn, "root1", role="user",
+                      content=[{"type": "text", "text": "do something"}],
+                      created_at="2026-03-09T10:00:00Z")
+        insert_test_node(conn, "reply1", role="assistant",
+                      content=[{"type": "text", "text": "ValueError: bad"}],
+                      created_at="2026-03-09T10:01:00Z",
+                      parent_hash="root1")
+
+        results = observe_session_inline(str(db_path), "root1")
+        errors = [r for r in results if "Exception" in r["content"]]
+        assert len(errors) >= 1
