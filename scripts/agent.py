@@ -6,7 +6,7 @@ Runs headless. Reads game state from memory. Makes decisions.
 Sends inputs. Logs everything. Designed for stereOS + Tapes.
 
 Usage:
-    python3 agent.py path/to/pokemon_red.gb [--strategy heuristic|llm]
+    python3 agent.py path/to/pokemon_red.gb [--strategy low|medium|high]
 """
 
 import argparse
@@ -28,6 +28,7 @@ except ImportError:
     Image = None
 
 from memory_reader import MemoryReader, BattleState, OverworldState, CollisionMap
+from memory_file import MemoryFile
 from pathfinding import astar_path
 
 # ---------------------------------------------------------------------------
@@ -308,19 +309,49 @@ class Navigator:
 
 
 # ---------------------------------------------------------------------------
+# Strategy engine
+# ---------------------------------------------------------------------------
+
+
+class StrategyEngine:
+    """Controls intelligence level based on strategy tier."""
+
+    STUCK_THRESHOLD = 10
+
+    def __init__(self, tier: str, notes_path: str | None = None):
+        self.tier = tier
+        self.notes: MemoryFile | None = None
+        if tier in ("medium", "high") and notes_path:
+            self.notes = MemoryFile(notes_path)
+
+    def should_call_llm(self, stuck_turns: int = 0, map_changed: bool = False) -> bool:
+        """Determine if an LLM call should be made this turn."""
+        if self.tier == "low":
+            return False
+        if self.tier == "high":
+            return True
+        # medium: call on triggers only
+        return stuck_turns >= self.STUCK_THRESHOLD or map_changed
+
+
+# ---------------------------------------------------------------------------
 # Main agent loop
 # ---------------------------------------------------------------------------
 
 class PokemonAgent:
     """Autonomous Pokemon player."""
 
-    def __init__(self, rom_path: str, strategy: str = "heuristic", screenshots: bool = False):
+    def __init__(self, rom_path: str, strategy: str = "low", screenshots: bool = False):
         self.rom_path = rom_path
         self.pyboy = PyBoy(rom_path, window="null")
         self.controller = GameController(self.pyboy)
         self.memory = MemoryReader(self.pyboy)
         self.type_chart = load_type_chart()
         self.battle_strategy = BattleStrategy(self.type_chart)
+        self.strategy_engine = StrategyEngine(
+            strategy,
+            notes_path=str(SCRIPT_DIR.parent / "notes.md") if strategy != "low" else None,
+        )
         self.turn_count = 0
         self.battles_won = 0
         self.screenshots = screenshots
@@ -597,9 +628,9 @@ def main():
     parser.add_argument("rom", help="Path to ROM file (.gb or .gbc)")
     parser.add_argument(
         "--strategy",
-        choices=["heuristic", "llm"],
-        default="heuristic",
-        help="Decision strategy (default: heuristic)",
+        choices=["low", "medium", "high"],
+        default="low",
+        help="Decision strategy (default: low)",
     )
     parser.add_argument(
         "--max-turns",

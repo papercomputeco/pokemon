@@ -24,6 +24,7 @@ from agent import (
     GameController,
     BattleStrategy,
     Navigator,
+    StrategyEngine,
     PokemonAgent,
     main,
 )
@@ -526,7 +527,7 @@ def _make_agent(tmp_path, screenshots=False, routes=None, type_chart_data=None):
     ):
         ag = PokemonAgent(
             str(tmp_path / "fake.gb"),
-            strategy="heuristic",
+            strategy="low",
             screenshots=screenshots,
         )
 
@@ -538,6 +539,52 @@ def _make_agent(tmp_path, screenshots=False, routes=None, type_chart_data=None):
         ag.frames_dir.mkdir(parents=True, exist_ok=True)
 
     return ag
+
+
+# ===================================================================
+# StrategyEngine tests
+# ===================================================================
+
+
+class TestStrategyEngine:
+    def test_low_tier_no_notes(self):
+        engine = StrategyEngine("low")
+        assert engine.tier == "low"
+        assert engine.notes is None
+
+    def test_medium_tier_has_notes(self, tmp_path):
+        engine = StrategyEngine("medium", notes_path=str(tmp_path / "notes.md"))
+        assert engine.tier == "medium"
+        assert engine.notes is not None
+
+    def test_high_tier_has_notes(self, tmp_path):
+        engine = StrategyEngine("high", notes_path=str(tmp_path / "notes.md"))
+        assert engine.tier == "high"
+        assert engine.notes is not None
+
+    def test_medium_no_notes_path(self):
+        engine = StrategyEngine("medium")
+        assert engine.notes is None
+
+    def test_should_call_llm_low_never(self):
+        engine = StrategyEngine("low")
+        assert engine.should_call_llm(stuck_turns=100, map_changed=True) is False
+
+    def test_should_call_llm_medium_when_stuck(self):
+        engine = StrategyEngine("medium")
+        assert engine.should_call_llm(stuck_turns=10, map_changed=False) is True
+
+    def test_should_call_llm_medium_on_map_change(self):
+        engine = StrategyEngine("medium")
+        assert engine.should_call_llm(stuck_turns=0, map_changed=True) is True
+
+    def test_should_call_llm_medium_not_stuck(self):
+        engine = StrategyEngine("medium")
+        assert engine.should_call_llm(stuck_turns=5, map_changed=False) is False
+
+    def test_should_call_llm_high_always(self):
+        engine = StrategyEngine("high")
+        assert engine.should_call_llm(stuck_turns=0, map_changed=False) is True
 
 
 # ===================================================================
@@ -1040,11 +1087,11 @@ class TestMain:
         mock_agent = MagicMock()
 
         with patch(
-            "sys.argv", ["agent.py", str(rom), "--strategy", "heuristic", "--max-turns", "5"]
+            "sys.argv", ["agent.py", str(rom), "--strategy", "low", "--max-turns", "5"]
         ), patch("agent.PokemonAgent", return_value=mock_agent) as mock_cls:
             main()
 
-        mock_cls.assert_called_once_with(str(rom), strategy="heuristic", screenshots=False)
+        mock_cls.assert_called_once_with(str(rom), strategy="low", screenshots=False)
         mock_agent.run.assert_called_once_with(max_turns=5)
 
     def test_main_rom_not_found(self, tmp_path):
@@ -1067,7 +1114,7 @@ class TestMain:
         ), patch("agent.PokemonAgent", return_value=mock_agent) as mock_cls:
             main()
 
-        mock_cls.assert_called_once_with(str(rom), strategy="heuristic", screenshots=True)
+        mock_cls.assert_called_once_with(str(rom), strategy="low", screenshots=True)
         mock_agent.run.assert_called_once_with(max_turns=10)
 
     def test_main_default_args(self, tmp_path):
@@ -1081,7 +1128,7 @@ class TestMain:
         ) as mock_cls:
             main()
 
-        mock_cls.assert_called_once_with(str(rom), strategy="heuristic", screenshots=False)
+        mock_cls.assert_called_once_with(str(rom), strategy="low", screenshots=False)
         mock_agent.run.assert_called_once_with(max_turns=100_000)
 
 
