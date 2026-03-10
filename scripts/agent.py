@@ -764,12 +764,18 @@ class PokemonAgent:
             self.backtrack.save_snapshot(self.pyboy, state, self.turn_count)
         self._bt_last_map_id = state.map_id
 
-        # Periodic snapshot when not stuck
+        # Periodic snapshot when making progress (not stuck, and position
+        # differs from last snapshot to avoid poisoning the pool)
         if (self._bt_snapshot_interval > 0
                 and self.turn_count > 0
                 and self.turn_count % self._bt_snapshot_interval == 0
                 and self.stuck_turns == 0):
-            self.backtrack.save_snapshot(self.pyboy, state, self.turn_count)
+            last_snap = self.backtrack.snapshots[-1] if self.backtrack.snapshots else None
+            if (last_snap is None
+                    or last_snap.map_id != state.map_id
+                    or last_snap.x != state.x
+                    or last_snap.y != state.y):
+                self.backtrack.save_snapshot(self.pyboy, state, self.turn_count)
 
         # Restore when stuck too long
         if self.backtrack.should_restore(self.stuck_turns):
@@ -777,6 +783,12 @@ class PokemonAgent:
             if snap is not None:
                 self.stuck_turns = 0
                 self.recent_positions.clear()
+                # Reset script-gate flags so one-time sequences can re-trigger
+                for attr in ('_oak_wait_done', '_pallet_diag_done',
+                             '_house_diag_done', '_lab_phase', '_lab_turns',
+                             '_lab_exit_turns'):
+                    if hasattr(self, attr):
+                        delattr(self, attr)
                 state = self.memory.read_overworld_state()
                 self.log(
                     f"BACKTRACK | Restored to turn {snap.turn} "

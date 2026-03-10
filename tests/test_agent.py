@@ -804,6 +804,45 @@ class TestBacktrackIntegration:
         backtrack_events = [e for e in ag.events if "BACKTRACK" in e]
         assert len(backtrack_events) == 1
 
+    def test_restore_resets_script_gate_flags(self, tmp_path):
+        ag = _make_agent(tmp_path)
+        ag.backtrack.restore_threshold = 1
+        state = OverworldState(map_id=0, x=5, y=5)
+        ag.memory.read_overworld_state = MagicMock(return_value=state)
+        ag.backtrack.save_snapshot(ag.pyboy, state, turn=0)
+        ag._bt_last_map_id = 0
+        ag.stuck_turns = 1
+
+        # Set flags that should be cleared on restore
+        ag._oak_wait_done = True
+        ag._pallet_diag_done = True
+        ag._house_diag_done = True
+
+        ag.run_overworld()
+
+        assert not hasattr(ag, '_oak_wait_done')
+        assert not hasattr(ag, '_pallet_diag_done')
+        assert not hasattr(ag, '_house_diag_done')
+
+    def test_periodic_snapshot_skips_duplicate_position(self, tmp_path):
+        ag = _make_agent(tmp_path)
+        ag._bt_snapshot_interval = 1  # every turn
+        state = OverworldState(map_id=0, x=5, y=5)
+        ag.memory.read_overworld_state = MagicMock(return_value=state)
+        ag._bt_last_map_id = 0
+        ag.stuck_turns = 0
+
+        # First overworld call at turn 1 should snapshot
+        ag.turn_count = 1
+        ag.run_overworld()
+        assert len(ag.backtrack.snapshots) == 1
+
+        # Second call at same position should NOT add another
+        ag.turn_count = 2
+        ag.stuck_turns = 0
+        ag.run_overworld()
+        assert len(ag.backtrack.snapshots) == 1
+
 
 # ===================================================================
 # StrategyEngine tests
