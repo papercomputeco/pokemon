@@ -125,7 +125,7 @@ pokemon-agent/
 │   ├── install.sh           # setup: Python, PyBoy, Tapes
 │   ├── agent.py             # main agent loop + strategies
 │   ├── memory_reader.py     # memory address definitions
-│   ├── tape_reader.py       # JSONL tape parser (stdlib only)
+│   ├── tape_reader.py       # Tapes SQLite reader (stdlib only)
 │   ├── observer.py          # heuristic observation extractor
 │   └── observe_cli.py       # CLI for running the observer
 ├── references/

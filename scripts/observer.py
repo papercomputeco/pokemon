@@ -7,7 +7,7 @@ from Tapes conversation data and write them to memory files.
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from tape_reader import TapeReader, TapeEntry, TapeSession
@@ -60,6 +60,9 @@ class Observer:
 
         # Update watermark with all available sessions
         state = self.load_state()
+        # NOTE: This list grows with each new session. Fine for typical usage
+        # (tens to low hundreds of sessions) but may need rotation if the
+        # database grows to thousands of sessions.
         state["processed_sessions"] = list(
             set(state.get("processed_sessions", []))
             | set(self.reader.list_sessions())
@@ -78,7 +81,7 @@ class Observer:
     def observe_session(self, session: TapeSession) -> list[Observation]:
         """Extract observations from a parsed session via heuristics."""
         observations: list[Observation] = []
-        now = datetime.utcnow().isoformat() + "Z"
+        now = datetime.now(timezone.utc).isoformat() + "Z"
 
         # 1. Context: first user message (session goal)
         first_user = _first_user_message(session)
@@ -218,16 +221,27 @@ class Observer:
 
 
 def _first_user_message(session: TapeSession) -> str:
-    """Extract the first user message text from a session."""
+    """Extract the first user message text from a session.
+
+    Skips system framework noise (e.g. <system-reminder> tags) that Tapes
+    stores as user-role nodes.
+    """
     for entry in session.entries:
         if entry.type == "user" and entry.text_content:
+            stripped = entry.text_content.strip()
+            if stripped.startswith("<system-reminder>"):
+                continue
             return entry.text_content
     return ""
 
 
 def _has_traceback(text: str) -> bool:
     """Check if text contains Python traceback patterns."""
-    return "Traceback (most recent call last)" in text or "Error:" in text
+    if "Traceback (most recent call last)" in text:
+        return True
+    # Match "SomeError:" or "SomeException:" at line start — avoids false
+    # positives like "I see the error" or "Error handling is important".
+    return bool(re.search(r"^\w*(Error|Exception):", text, re.MULTILINE))
 
 
 def _extract_traceback_summary(text: str) -> str:

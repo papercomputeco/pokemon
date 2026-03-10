@@ -84,5 +84,5 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Wrote {len(observations)} observation(s) to {observer.observations_path}")
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover
     main()

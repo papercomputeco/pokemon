@@ -1,10 +1,10 @@
 """Tests for observer.py — 100% coverage."""
 
 import json
-import sqlite3
 
 import pytest
 
+from tape_helpers import create_test_db, insert_test_node
 from observer import (
     Observation,
     Observer,
@@ -13,42 +13,6 @@ from observer import (
     _extract_traceback_summary,
 )
 from tape_reader import TapeEntry, TapeSession, ToolResult, TokenUsage
-
-
-def _create_db(path):
-    """Create a tapes.sqlite with the nodes schema."""
-    conn = sqlite3.connect(str(path))
-    conn.execute(
-        "CREATE TABLE nodes ("
-        "  hash TEXT PRIMARY KEY,"
-        "  role TEXT,"
-        "  content JSON,"
-        "  created_at DATETIME,"
-        "  prompt_tokens INTEGER,"
-        "  completion_tokens INTEGER,"
-        "  cache_creation_input_tokens INTEGER,"
-        "  cache_read_input_tokens INTEGER,"
-        "  parent_hash TEXT,"
-        "  model TEXT,"
-        "  agent_name TEXT"
-        ")"
-    )
-    conn.commit()
-    return conn
-
-
-def _insert_node(conn, hash_val, role="user", content=None, created_at="2026-03-09T10:00:00Z",
-                 prompt_tokens=None, completion_tokens=None, cache_creation=None,
-                 cache_read=None, parent_hash=None, model=None, agent_name=None):
-    """Insert a node into the test database."""
-    content_json = json.dumps(content) if content is not None else None
-    conn.execute(
-        "INSERT INTO nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (hash_val, role, content_json, created_at,
-         prompt_tokens, completion_tokens, cache_creation, cache_read,
-         parent_hash, model, agent_name),
-    )
-    conn.commit()
 
 
 # ── Observation dataclass ────────────────────────────────────────────
@@ -93,16 +57,49 @@ class TestFirstUserMessage:
         )
         assert _first_user_message(session) == "actual message"
 
+    def test_skips_system_reminder(self):
+        session = TapeSession(
+            session_id="s1",
+            entries=[
+                TapeEntry(type="user", text_content="<system-reminder>\nsome hook output\n</system-reminder>"),
+                TapeEntry(type="user", text_content="fix the bug"),
+            ],
+        )
+        assert _first_user_message(session) == "fix the bug"
+
+    def test_all_system_reminders(self):
+        session = TapeSession(
+            session_id="s1",
+            entries=[
+                TapeEntry(type="user", text_content="<system-reminder>hook</system-reminder>"),
+            ],
+        )
+        assert _first_user_message(session) == ""
+
 
 class TestHasTraceback:
     def test_python_traceback(self):
         assert _has_traceback("Traceback (most recent call last):\n  File...")
 
-    def test_error_colon(self):
+    def test_error_at_line_start(self):
         assert _has_traceback("ValueError: bad value")
+
+    def test_exception_at_line_start(self):
+        assert _has_traceback("RuntimeException: oops")
+
+    def test_error_midline_no_match(self):
+        """Casual mention of 'error' should not match."""
+        assert not _has_traceback("I see the error in the code")
+
+    def test_error_in_sentence(self):
+        assert not _has_traceback("Error handling is important")
 
     def test_no_traceback(self):
         assert not _has_traceback("everything is fine")
+
+    def test_multiline_with_error_on_own_line(self):
+        text = "Some context\nModuleNotFoundError: No module named 'foo'\nmore"
+        assert _has_traceback(text)
 
 
 class TestExtractTracebackSummary:
@@ -125,7 +122,7 @@ class TestExtractTracebackSummary:
 class TestObserverInit:
     def test_constructor(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         obs = Observer(
             db_path=str(db_path),
             memory_dir=str(tmp_path / "memory"),
@@ -137,18 +134,18 @@ class TestObserverInit:
 class TestGetUnprocessedSessions:
     def test_all_unprocessed(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        conn = _create_db(db_path)
-        _insert_node(conn, "aaa", created_at="2026-01-01T00:00:00Z")
-        _insert_node(conn, "bbb", created_at="2026-01-02T00:00:00Z")
+        conn = create_test_db(db_path)
+        insert_test_node(conn, "aaa", created_at="2026-01-01T00:00:00Z")
+        insert_test_node(conn, "bbb", created_at="2026-01-02T00:00:00Z")
 
         obs = Observer(str(db_path), str(tmp_path / "memory"))
         assert obs.get_unprocessed_sessions() == ["aaa", "bbb"]
 
     def test_some_processed(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        conn = _create_db(db_path)
-        _insert_node(conn, "aaa", created_at="2026-01-01T00:00:00Z")
-        _insert_node(conn, "bbb", created_at="2026-01-02T00:00:00Z")
+        conn = create_test_db(db_path)
+        insert_test_node(conn, "aaa", created_at="2026-01-01T00:00:00Z")
+        insert_test_node(conn, "bbb", created_at="2026-01-02T00:00:00Z")
 
         mem = tmp_path / "memory"
         mem.mkdir()
@@ -161,8 +158,8 @@ class TestGetUnprocessedSessions:
 
     def test_all_processed(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        conn = _create_db(db_path)
-        _insert_node(conn, "aaa", created_at="2026-01-01T00:00:00Z")
+        conn = create_test_db(db_path)
+        insert_test_node(conn, "aaa", created_at="2026-01-01T00:00:00Z")
 
         mem = tmp_path / "memory"
         mem.mkdir()
@@ -175,7 +172,7 @@ class TestGetUnprocessedSessions:
 
     def test_empty_db(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         obs = Observer(str(db_path), str(tmp_path / "memory"))
         assert obs.get_unprocessed_sessions() == []
 
@@ -191,7 +188,7 @@ class TestObserveSession:
 
     def test_extracts_session_goal(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         session = self._make_session(
             entries=[TapeEntry(type="user", text_content="fix the login bug")]
         )
@@ -203,7 +200,7 @@ class TestObserveSession:
 
     def test_extracts_tool_errors(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         session = self._make_session(
             entries=[
                 TapeEntry(
@@ -227,7 +224,7 @@ class TestObserveSession:
 
     def test_extracts_tracebacks(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         session = self._make_session(
             entries=[
                 TapeEntry(
@@ -246,7 +243,7 @@ class TestObserveSession:
         from tape_reader import ToolUse
 
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         session = self._make_session(
             entries=[
                 TapeEntry(
@@ -266,7 +263,7 @@ class TestObserveSession:
 
     def test_extracts_token_usage(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         session = self._make_session(
             entries=[
                 TapeEntry(
@@ -287,7 +284,7 @@ class TestObserveSession:
 
     def test_no_token_usage_when_zero(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         session = self._make_session(entries=[TapeEntry(type="assistant")])
         obs = Observer(str(db_path), str(tmp_path / "mem"))
         results = obs.observe_session(session)
@@ -296,7 +293,7 @@ class TestObserveSession:
 
     def test_empty_session(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         session = self._make_session()
         obs = Observer(str(db_path), str(tmp_path / "mem"))
         results = obs.observe_session(session)
@@ -306,7 +303,7 @@ class TestObserveSession:
         from tape_reader import ToolUse
 
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         session = self._make_session(
             entries=[
                 TapeEntry(
@@ -324,7 +321,7 @@ class TestObserveSession:
         from tape_reader import ToolUse
 
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         session = self._make_session(
             entries=[
                 TapeEntry(
@@ -344,7 +341,7 @@ class TestObserveSession:
 class TestClassifyPriority:
     def test_important_keywords(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         obs = Observer(str(db_path), str(tmp_path / "mem"))
         assert obs.classify_priority("Fixed a bug in login") == "important"
         assert obs.classify_priority("Error: connection failed") == "important"
@@ -353,7 +350,7 @@ class TestClassifyPriority:
 
     def test_possible_keywords(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         obs = Observer(str(db_path), str(tmp_path / "mem"))
         assert obs.classify_priority("test coverage added") == "possible"
         assert obs.classify_priority("refactor the module") == "possible"
@@ -361,19 +358,19 @@ class TestClassifyPriority:
 
     def test_informational_default(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         obs = Observer(str(db_path), str(tmp_path / "mem"))
         assert obs.classify_priority("Session started") == "informational"
 
     def test_custom_default(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         obs = Observer(str(db_path), str(tmp_path / "mem"))
         assert obs.classify_priority("nothing special", "possible") == "possible"
 
     def test_important_beats_possible(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         obs = Observer(str(db_path), str(tmp_path / "mem"))
         assert obs.classify_priority("fix the test") == "important"
 
@@ -381,7 +378,7 @@ class TestClassifyPriority:
 class TestWriteObservations:
     def test_writes_markdown_file(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         mem = tmp_path / "memory"
         obs = Observer(str(db_path), str(mem))
         observations = [
@@ -409,7 +406,7 @@ class TestWriteObservations:
 
     def test_appends_to_existing(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         mem = tmp_path / "memory"
         mem.mkdir()
         (mem / "observations.md").write_text("# Existing\n\n## 2026-03-08\n- old\n")
@@ -433,7 +430,7 @@ class TestWriteObservations:
 
     def test_no_duplicate_date_headers(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         mem = tmp_path / "memory"
         mem.mkdir()
         (mem / "observations.md").write_text("## 2026-03-09\n- existing\n")
@@ -455,7 +452,7 @@ class TestWriteObservations:
 
     def test_unknown_date(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         mem = tmp_path / "memory"
         obs = Observer(str(db_path), str(mem))
         obs.write_observations(
@@ -474,7 +471,7 @@ class TestWriteObservations:
 
     def test_multiple_dates_sorted(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         mem = tmp_path / "memory"
         obs = Observer(str(db_path), str(mem))
         obs.write_observations(
@@ -499,7 +496,7 @@ class TestWriteObservations:
 
     def test_creates_memory_dir(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         mem = tmp_path / "deep" / "nested" / "memory"
         obs = Observer(str(db_path), str(mem))
         obs.write_observations(
@@ -517,13 +514,13 @@ class TestWriteObservations:
 class TestLoadState:
     def test_missing_file_returns_empty(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         obs = Observer(str(db_path), str(tmp_path / "mem"))
         assert obs.load_state() == {}
 
     def test_reads_existing_state(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         mem = tmp_path / "mem"
         mem.mkdir()
         (mem / "observer_state.json").write_text(
@@ -537,7 +534,7 @@ class TestLoadState:
 class TestSaveState:
     def test_writes_json(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         mem = tmp_path / "mem"
         obs = Observer(str(db_path), str(mem))
         obs.save_state({"processed_sessions": ["x"]})
@@ -547,7 +544,7 @@ class TestSaveState:
 
     def test_creates_dir(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         mem = tmp_path / "new" / "dir"
         obs = Observer(str(db_path), str(mem))
         obs.save_state({"key": "val"})
@@ -557,13 +554,13 @@ class TestSaveState:
 class TestRun:
     def test_end_to_end(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        conn = _create_db(db_path)
+        conn = create_test_db(db_path)
         mem = tmp_path / "memory"
 
-        _insert_node(conn, "root1", role="user",
+        insert_test_node(conn, "root1", role="user",
                       content=[{"type": "text", "text": "fix the crash"}],
                       created_at="2026-03-09T10:00:00Z")
-        _insert_node(conn, "reply1", role="assistant",
+        insert_test_node(conn, "reply1", role="assistant",
                       content=[{"type": "text", "text": "I see the error"}],
                       created_at="2026-03-09T10:01:00Z",
                       parent_hash="root1",
@@ -583,7 +580,7 @@ class TestRun:
 
     def test_run_with_no_sessions(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         mem = tmp_path / "memory"
 
         obs = Observer(str(db_path), str(mem))
@@ -592,10 +589,10 @@ class TestRun:
 
     def test_run_updates_watermark(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        conn = _create_db(db_path)
+        conn = create_test_db(db_path)
         mem = tmp_path / "memory"
 
-        _insert_node(conn, "root1", role="user",
+        insert_test_node(conn, "root1", role="user",
                       content=[{"type": "text", "text": "hello"}],
                       created_at="2026-03-09T10:00:00Z")
 
@@ -608,11 +605,11 @@ class TestRun:
     def test_run_no_observations_no_write(self, tmp_path):
         """When observe_session returns empty, observations.md shouldn't be created."""
         db_path = tmp_path / "tapes.sqlite"
-        conn = _create_db(db_path)
+        conn = create_test_db(db_path)
         mem = tmp_path / "memory"
 
         # Empty-role node produces no observations
-        _insert_node(conn, "root1", role="", content=[],
+        insert_test_node(conn, "root1", role="", content=[],
                       created_at="2026-03-09T10:00:00Z")
 
         obs = Observer(str(db_path), str(mem))

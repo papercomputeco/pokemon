@@ -17,11 +17,11 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["scripts"]
+pythonpath = ["scripts", "tests"]
 
 [tool.coverage.run]
 source = ["scripts"]
-omit = ["scripts/diagnose.py", "scripts/install.sh", "scripts/observe_cli.py"]
+omit = ["scripts/diagnose.py", "scripts/install.sh"]
 
 [tool.coverage.report]
 show_missing = true
