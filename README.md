@@ -42,7 +42,7 @@ The VM configuration lives in `jcard.toml`. It mounts the repo at `/workspace`, 
 
 ```bash
 bash scripts/install.sh
-python3 scripts/agent.py rom/pokemon_red.gb --strategy heuristic --max-turns 1000
+uv run scripts/agent.py rom/pokemon_red.gb --strategy heuristic --max-turns 1000
 ```
 
 Add `--save-screenshots` to capture frames every 10 turns into `frames/`.
@@ -97,16 +97,16 @@ Each observation is tagged `[important]`, `[possible]`, or `[informational]` bas
 
 ```bash
 # Preview observations without writing
-python3 scripts/observe_cli.py --dry-run
+uv run scripts/observe_cli.py --dry-run
 
 # Process all unprocessed sessions
-python3 scripts/observe_cli.py
+uv run scripts/observe_cli.py
 
 # Reprocess everything from scratch
-python3 scripts/observe_cli.py --reset
+uv run scripts/observe_cli.py --reset
 
 # Process a single session by root node hash
-python3 scripts/observe_cli.py --session <hash>
+uv run scripts/observe_cli.py --session <hash>
 ```
 
 Auto-detects `.tapes/tapes.sqlite` from cwd. Override with `--db`.
