@@ -75,11 +75,14 @@ Session data lives in `.tapes/` (gitignored).
 
 ## Observational Memory
 
-Claude Code writes conversation tapes (JSONL) for every session but never reads them back. The observational memory system closes that loop: it reads tapes, extracts noteworthy events via heuristic pattern matching (no LLM calls), and writes prioritized observations to memory files that persist across sessions.
+The project has two telemetry sources: **Tapes** (tapes.dev) records LLM API calls in a SQLite database at `.tapes/tapes.sqlite`, while **Claude Code** writes conversation session logs as JSONL files at `~/.claude/projects/<project>/`. The observational memory system reads the Claude Code JSONL sessions, extracts noteworthy events via heuristic pattern matching (no LLM calls), and writes prioritized observations to memory files.
 
 ```
+.tapes/
+└── tapes.sqlite             # Tapes telemetry: nodes, embeddings, facets
+
 ~/.claude/projects/<project>/
-├── *.jsonl                  # conversation tapes (one per session)
+├── *.jsonl                  # Claude Code session logs (one per session)
 └── memory/
     ├── observations.md      # date-grouped observations with priority tags
     └── observer_state.json  # watermark tracking processed sessions
