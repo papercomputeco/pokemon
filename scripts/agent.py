@@ -10,10 +10,13 @@ Usage:
 """
 
 import argparse
+import io
 import json
 import sys
 import time
 import os
+from collections import deque
+from dataclasses import dataclass, field
 from pathlib import Path
 
 try:
@@ -333,6 +336,62 @@ class Navigator:
 
 
 # ---------------------------------------------------------------------------
+# FLE-style backtracking
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Snapshot:
+    """A saved game state for backtracking."""
+
+    state_bytes: io.BytesIO
+    map_id: int
+    x: int
+    y: int
+    turn: int
+    attempts: int = 0
+
+
+class BacktrackManager:
+    """Save/restore game state to escape stuck navigation."""
+
+    def __init__(self, max_snapshots: int = 8, restore_threshold: int = 15, max_attempts: int = 3):
+        self.snapshots: deque[Snapshot] = deque(maxlen=max_snapshots)
+        self.max_snapshots = max_snapshots
+        self.restore_threshold = restore_threshold
+        self.max_attempts = max_attempts
+        self.total_restores = 0
+
+    def save_snapshot(self, pyboy, state: OverworldState, turn: int):
+        """Capture current game state into an in-memory snapshot."""
+        buf = io.BytesIO()
+        pyboy.save_state(buf)
+        buf.seek(0)
+        self.snapshots.append(Snapshot(buf, state.map_id, state.x, state.y, turn))
+
+    def should_restore(self, stuck_turns: int) -> bool:
+        """Check if we should restore a snapshot based on stuck duration."""
+        if stuck_turns < self.restore_threshold or not self.snapshots:
+            return False
+        return any(s.attempts < self.max_attempts for s in self.snapshots)
+
+    def restore(self, pyboy) -> Snapshot | None:
+        """Restore the most recent viable snapshot. Returns it or None."""
+        for i in range(len(self.snapshots) - 1, -1, -1):
+            snap = self.snapshots[i]
+            if snap.attempts < self.max_attempts:
+                del self.snapshots[i]
+                snap.state_bytes.seek(0)
+                pyboy.load_state(snap.state_bytes)
+                snap.attempts += 1
+                self.total_restores += 1
+                if snap.attempts < self.max_attempts:
+                    self.snapshots.append(snap)  # keep for more attempts
+                return snap
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Strategy engine
 # ---------------------------------------------------------------------------
 
@@ -416,6 +475,15 @@ class PokemonAgent:
             self._evolve_door_cooldown = int(self.evolve_params["door_cooldown"])
         else:
             self._evolve_door_cooldown = 8
+
+        # Backtracking support (FLE-style)
+        self.backtrack = BacktrackManager(
+            max_snapshots=int(self.evolve_params.get("bt_max_snapshots", 8)),
+            restore_threshold=int(self.evolve_params.get("bt_restore_threshold", 15)),
+            max_attempts=int(self.evolve_params.get("bt_max_attempts", 3)),
+        )
+        self._bt_snapshot_interval = int(self.evolve_params.get("bt_snapshot_interval", 50))
+        self._bt_last_map_id: int | None = None
 
         # Rebuild navigator with evolved params
         if self.evolve_params:
@@ -690,6 +758,32 @@ class PokemonAgent:
         except Exception:
             pass  # game_wrapper may not be available in all contexts
 
+        # --- FLE backtracking ---
+        # Snapshot on map change
+        if self._bt_last_map_id is not None and state.map_id != self._bt_last_map_id:
+            self.backtrack.save_snapshot(self.pyboy, state, self.turn_count)
+        self._bt_last_map_id = state.map_id
+
+        # Periodic snapshot when not stuck
+        if (self._bt_snapshot_interval > 0
+                and self.turn_count > 0
+                and self.turn_count % self._bt_snapshot_interval == 0
+                and self.stuck_turns == 0):
+            self.backtrack.save_snapshot(self.pyboy, state, self.turn_count)
+
+        # Restore when stuck too long
+        if self.backtrack.should_restore(self.stuck_turns):
+            snap = self.backtrack.restore(self.pyboy)
+            if snap is not None:
+                self.stuck_turns = 0
+                self.recent_positions.clear()
+                state = self.memory.read_overworld_state()
+                self.log(
+                    f"BACKTRACK | Restored to turn {snap.turn} "
+                    f"map={snap.map_id} ({snap.x},{snap.y}) "
+                    f"attempt={snap.attempts}"
+                )
+
         # Diagnostic: capture screen and collision data at key positions
         if state.map_id == 37 and not hasattr(self, '_house_diag_done'):
             self._house_diag_done = True
@@ -782,6 +876,7 @@ class PokemonAgent:
             "badges": final.badges,
             "party_size": final.party_count,
             "stuck_count": len([e for e in self.events if "STUCK" in e]),
+            "backtrack_restores": self.backtrack.total_restores,
         }
 
     def run(self, max_turns: int = 100_000):

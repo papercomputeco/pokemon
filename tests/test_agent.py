@@ -1,6 +1,7 @@
 """Comprehensive tests for agent.py — targeting 100% line coverage."""
 
 import importlib
+import io
 import json
 import os
 import runpy
@@ -25,6 +26,8 @@ from agent import (
     GameController,
     BattleStrategy,
     Navigator,
+    Snapshot,
+    BacktrackManager,
     StrategyEngine,
     PokemonAgent,
     main,
@@ -550,6 +553,256 @@ def _make_agent(tmp_path, screenshots=False, routes=None, type_chart_data=None):
         ag.frames_dir.mkdir(parents=True, exist_ok=True)
 
     return ag
+
+
+# ===================================================================
+# BacktrackManager tests
+# ===================================================================
+
+
+class TestBacktrackManager:
+    """Tests for Snapshot dataclass and BacktrackManager."""
+
+    def test_snapshot_defaults(self):
+        buf = io.BytesIO(b"state")
+        snap = Snapshot(state_bytes=buf, map_id=1, x=5, y=10, turn=42)
+        assert snap.attempts == 0
+        assert snap.map_id == 1
+        assert snap.turn == 42
+
+    def test_init_defaults(self):
+        bm = BacktrackManager()
+        assert bm.max_snapshots == 8
+        assert bm.restore_threshold == 15
+        assert bm.max_attempts == 3
+        assert bm.total_restores == 0
+        assert len(bm.snapshots) == 0
+
+    def test_init_custom(self):
+        bm = BacktrackManager(max_snapshots=4, restore_threshold=10, max_attempts=5)
+        assert bm.max_snapshots == 4
+        assert bm.restore_threshold == 10
+        assert bm.max_attempts == 5
+
+    def test_save_snapshot(self):
+        bm = BacktrackManager(max_snapshots=3)
+        mock_pyboy = MagicMock()
+        state = OverworldState(map_id=1, x=5, y=10)
+
+        bm.save_snapshot(mock_pyboy, state, turn=10)
+        assert len(bm.snapshots) == 1
+        assert bm.snapshots[0].map_id == 1
+        assert bm.snapshots[0].x == 5
+        assert bm.snapshots[0].y == 10
+        assert bm.snapshots[0].turn == 10
+        mock_pyboy.save_state.assert_called_once()
+
+    def test_save_snapshot_deque_bounds(self):
+        bm = BacktrackManager(max_snapshots=2)
+        mock_pyboy = MagicMock()
+        for i in range(5):
+            state = OverworldState(map_id=i, x=i, y=i)
+            bm.save_snapshot(mock_pyboy, state, turn=i)
+        assert len(bm.snapshots) == 2
+        # Oldest snapshots should have been evicted
+        assert bm.snapshots[0].map_id == 3
+        assert bm.snapshots[1].map_id == 4
+
+    def test_should_restore_below_threshold(self):
+        bm = BacktrackManager(restore_threshold=15)
+        mock_pyboy = MagicMock()
+        bm.save_snapshot(mock_pyboy, OverworldState(map_id=0, x=0, y=0), turn=0)
+        assert bm.should_restore(14) is False
+
+    def test_should_restore_no_snapshots(self):
+        bm = BacktrackManager(restore_threshold=5)
+        assert bm.should_restore(10) is False
+
+    def test_should_restore_all_exhausted(self):
+        bm = BacktrackManager(restore_threshold=5, max_attempts=1)
+        snap = Snapshot(io.BytesIO(b"x"), map_id=0, x=0, y=0, turn=0, attempts=1)
+        bm.snapshots.append(snap)
+        assert bm.should_restore(10) is False
+
+    def test_should_restore_viable(self):
+        bm = BacktrackManager(restore_threshold=5, max_attempts=3)
+        mock_pyboy = MagicMock()
+        bm.save_snapshot(mock_pyboy, OverworldState(map_id=0, x=0, y=0), turn=0)
+        assert bm.should_restore(5) is True
+
+    def test_restore_loads_state(self):
+        bm = BacktrackManager(max_attempts=3)
+        mock_pyboy = MagicMock()
+        bm.save_snapshot(mock_pyboy, OverworldState(map_id=1, x=3, y=7), turn=20)
+
+        snap = bm.restore(mock_pyboy)
+        assert snap is not None
+        assert snap.map_id == 1
+        assert snap.x == 3
+        assert snap.y == 7
+        assert snap.turn == 20
+        assert snap.attempts == 1
+        assert bm.total_restores == 1
+        mock_pyboy.load_state.assert_called_once()
+
+    def test_restore_keeps_snapshot_if_attempts_remain(self):
+        bm = BacktrackManager(max_attempts=3)
+        mock_pyboy = MagicMock()
+        bm.save_snapshot(mock_pyboy, OverworldState(map_id=1, x=0, y=0), turn=10)
+
+        bm.restore(mock_pyboy)
+        # Snapshot re-appended with attempts=1
+        assert len(bm.snapshots) == 1
+        assert bm.snapshots[0].attempts == 1
+
+    def test_restore_removes_snapshot_at_max_attempts(self):
+        bm = BacktrackManager(max_attempts=1)
+        mock_pyboy = MagicMock()
+        bm.save_snapshot(mock_pyboy, OverworldState(map_id=1, x=0, y=0), turn=10)
+
+        snap = bm.restore(mock_pyboy)
+        assert snap is not None
+        assert snap.attempts == 1
+        # Not re-appended since attempts == max_attempts
+        assert len(bm.snapshots) == 0
+
+    def test_restore_none_when_all_exhausted(self):
+        bm = BacktrackManager(max_attempts=1)
+        snap = Snapshot(io.BytesIO(b"x"), map_id=0, x=0, y=0, turn=0, attempts=1)
+        bm.snapshots.append(snap)
+
+        mock_pyboy = MagicMock()
+        result = bm.restore(mock_pyboy)
+        assert result is None
+        assert bm.total_restores == 0
+
+    def test_restore_picks_most_recent_viable(self):
+        bm = BacktrackManager(max_attempts=2)
+        # First snapshot exhausted
+        exhausted = Snapshot(io.BytesIO(b"old"), map_id=0, x=0, y=0, turn=5, attempts=2)
+        bm.snapshots.append(exhausted)
+        # Second snapshot viable
+        mock_pyboy = MagicMock()
+        bm.save_snapshot(mock_pyboy, OverworldState(map_id=1, x=3, y=3), turn=15)
+
+        snap = bm.restore(mock_pyboy)
+        assert snap is not None
+        assert snap.map_id == 1
+        assert snap.turn == 15
+
+    def test_total_restores_accumulates(self):
+        bm = BacktrackManager(max_attempts=5)
+        mock_pyboy = MagicMock()
+        bm.save_snapshot(mock_pyboy, OverworldState(map_id=0, x=0, y=0), turn=0)
+
+        bm.restore(mock_pyboy)
+        bm.restore(mock_pyboy)
+        assert bm.total_restores == 2
+
+
+class TestBacktrackIntegration:
+    """Test BacktrackManager integration with PokemonAgent."""
+
+    def test_agent_has_backtrack_manager(self, tmp_path):
+        ag = _make_agent(tmp_path)
+        assert hasattr(ag, "backtrack")
+        assert isinstance(ag.backtrack, BacktrackManager)
+
+    def test_agent_backtrack_defaults(self, tmp_path):
+        ag = _make_agent(tmp_path)
+        assert ag.backtrack.max_snapshots == 8
+        assert ag.backtrack.restore_threshold == 15
+        assert ag.backtrack.max_attempts == 3
+        assert ag._bt_snapshot_interval == 50
+
+    def test_evolve_params_flow_to_backtrack(self, tmp_path):
+        params = {
+            "stuck_threshold": 8, "door_cooldown": 8,
+            "waypoint_skip_distance": 3, "axis_preference_map_0": "y",
+            "bt_max_snapshots": 4, "bt_restore_threshold": 10,
+            "bt_max_attempts": 5, "bt_snapshot_interval": 25,
+        }
+        ag = _make_agent_with_evolve(tmp_path, evolve_params=params)
+        assert ag.backtrack.max_snapshots == 4
+        assert ag.backtrack.restore_threshold == 10
+        assert ag.backtrack.max_attempts == 5
+        assert ag._bt_snapshot_interval == 25
+
+    def test_snapshot_on_map_change(self, tmp_path):
+        ag = _make_agent(tmp_path)
+        state1 = OverworldState(map_id=0, x=5, y=5)
+        state2 = OverworldState(map_id=1, x=3, y=3)
+
+        ag.memory.read_overworld_state = MagicMock(return_value=state1)
+        ag._bt_last_map_id = 0  # set previous map
+        ag.run_overworld()
+
+        # No map change yet
+        initial_count = len(ag.backtrack.snapshots)
+
+        ag._bt_last_map_id = 0
+        ag.memory.read_overworld_state = MagicMock(return_value=state2)
+        ag.run_overworld()
+
+        # Map changed from 0 -> 1, should have saved a snapshot
+        assert len(ag.backtrack.snapshots) > initial_count
+
+    def test_periodic_snapshot(self, tmp_path):
+        ag = _make_agent(tmp_path)
+        ag._bt_snapshot_interval = 5
+        state = OverworldState(map_id=0, x=5, y=5)
+        ag.memory.read_overworld_state = MagicMock(return_value=state)
+        ag._bt_last_map_id = 0
+        ag.stuck_turns = 0
+
+        # Run until turn_count hits the interval
+        for _ in range(6):
+            ag.turn_count += 1
+            if ag.turn_count % ag._bt_snapshot_interval == 0 and ag.stuck_turns == 0:
+                ag.backtrack.save_snapshot(ag.pyboy, state, ag.turn_count)
+
+        assert len(ag.backtrack.snapshots) == 1
+
+    def test_restore_on_stuck(self, tmp_path):
+        ag = _make_agent(tmp_path)
+        ag.backtrack.restore_threshold = 3
+        state = OverworldState(map_id=0, x=5, y=5)
+        ag.memory.read_overworld_state = MagicMock(return_value=state)
+
+        # Save a snapshot manually
+        ag.backtrack.save_snapshot(ag.pyboy, state, turn=0)
+        ag._bt_last_map_id = 0
+
+        # Simulate being stuck
+        ag.stuck_turns = 3
+        ag.run_overworld()
+
+        # Should have restored
+        assert ag.backtrack.total_restores == 1
+        assert ag.stuck_turns == 0
+
+    def test_compute_fitness_includes_backtrack_restores(self, tmp_path):
+        ag = _make_agent(tmp_path)
+        ag.backtrack.total_restores = 7
+        ag.memory.read_overworld_state = MagicMock(
+            return_value=OverworldState(map_id=0, x=0, y=0)
+        )
+        fitness = ag.compute_fitness()
+        assert fitness["backtrack_restores"] == 7
+
+    def test_backtrack_event_logged(self, tmp_path):
+        ag = _make_agent(tmp_path)
+        ag.backtrack.restore_threshold = 1
+        state = OverworldState(map_id=0, x=5, y=5)
+        ag.memory.read_overworld_state = MagicMock(return_value=state)
+        ag.backtrack.save_snapshot(ag.pyboy, state, turn=0)
+        ag._bt_last_map_id = 0
+        ag.stuck_turns = 1
+
+        ag.run_overworld()
+
+        backtrack_events = [e for e in ag.events if "BACKTRACK" in e]
+        assert len(backtrack_events) == 1
 
 
 # ===================================================================
