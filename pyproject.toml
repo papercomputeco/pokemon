@@ -21,7 +21,7 @@ pythonpath = ["scripts", "tests"]
 
 [tool.coverage.run]
 source = ["scripts"]
-omit = ["scripts/diagnose.py", "scripts/install.sh", "scripts/observe_cli.py", "scripts/probe_*.py", "scripts/run_10_agents.py"]
+omit = ["scripts/diagnose.py", "scripts/install.sh", "scripts/observe_cli.py", "scripts/probe_*.py"]
 
 [tool.coverage.report]
 show_missing = true
