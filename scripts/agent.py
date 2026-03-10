@@ -410,6 +410,10 @@ class PokemonAgent:
         """Track whether the last overworld action moved the player."""
         pos = (state.map_id, state.x, state.y)
 
+        # Milestone detection (before adding to maps_visited)
+        if state.map_id == 1 and state.map_id not in self.maps_visited:
+            self.log("MILESTONE | Reached Viridian City!")
+
         self.maps_visited.add(state.map_id)
 
         if self.last_overworld_state is None:
@@ -446,10 +450,6 @@ class PokemonAgent:
                 f"STUCK | Map: {state.map_id} | Pos: ({state.x}, {state.y}) | "
                 f"Last move: {self.last_overworld_action} | Streak: {self.stuck_turns}"
             )
-
-        # Milestone detection
-        if state.map_id == 1 and state.map_id not in self.maps_visited:
-            self.log("MILESTONE | Reached Viridian City!")
 
     def choose_overworld_action(self, state: OverworldState) -> str:
         """Pick the next overworld action."""

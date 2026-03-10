@@ -1447,3 +1447,480 @@ class TestPokemonAgentCollisionMap:
             stuck_turns=ag.stuck_turns,
             collision_grid=ag.collision_map.grid,
         )
+
+
+# ===================================================================
+# Navigator._try_astar -- lines 284, 289
+# ===================================================================
+
+
+class TestTryAstar:
+    """Cover _try_astar returning first A* direction (284) and None (289)."""
+
+    def _open_grid(self):
+        return [[1] * 10 for _ in range(9)]
+
+    def test_astar_returns_first_direction(self):
+        """Line 284: A* succeeds and returns the first direction."""
+        nav = Navigator({})
+        state = OverworldState(map_id=10, x=5, y=5)
+        # Target at (6, 5) -> screen (4, 5), player at screen (4, 4)
+        result = nav._try_astar(state, 6, 5, self._open_grid())
+        assert result == "right"
+
+    def test_astar_out_of_bounds_returns_none(self):
+        """Line 289: screen target out of bounds -> returns None."""
+        nav = Navigator({})
+        state = OverworldState(map_id=10, x=5, y=5)
+        # Target at (20, 5) -> screen col = 4 + 15 = 19, out of 10-wide grid
+        result = nav._try_astar(state, 20, 5, self._open_grid())
+        assert result is None
+
+    def test_astar_no_path_returns_none(self):
+        """Line 289: target in bounds but no path found -> returns None."""
+        nav = Navigator({})
+        state = OverworldState(map_id=10, x=5, y=5)
+        # All walls, no path possible
+        grid = [[0] * 10 for _ in range(9)]
+        grid[4][4] = 1  # only player cell walkable
+        result = nav._try_astar(state, 6, 5, grid)
+        assert result is None
+
+
+# ===================================================================
+# Navigator.next_direction -- early game target nulled by party (284)
+# and at_target return (289), skip waypoint when stuck (322-323)
+# ===================================================================
+
+
+class TestNextDirectionUncoveredBranches:
+    """Cover lines 284, 289, 322-323 in next_direction."""
+
+    def test_map0_with_party_nulls_special_target(self):
+        """Line 284: map_id==0, party_count>0 sets special_target = None."""
+        # Map 0 is NOT in EARLY_GAME_TARGETS so this is a no-op path,
+        # but the assignment still executes if map_id == 0 and party_count > 0.
+        routes = {"0": [{"x": 8, "y": 10}]}
+        nav = Navigator(routes)
+        state = OverworldState(map_id=0, x=5, y=5, party_count=1)
+        result = nav.next_direction(state)
+        # Falls through to waypoint routing since special_target was None/nulled
+        assert result is not None
+
+    def test_at_early_game_target_returns_at_target_hint(self):
+        """Line 289: at target returns at_target hint (default 'down')."""
+        nav = Navigator({})
+        # Map 38 target is (7, 1) with axis "x" — no at_target key => default "down"
+        state = OverworldState(map_id=38, x=7, y=1)
+        result = nav.next_direction(state)
+        assert result == "down"
+
+    def test_skip_waypoint_when_stuck_and_close(self):
+        """Lines 322-323: stuck_turns>=8, dist<=3, skip waypoint."""
+        routes = {"10": [{"x": 5, "y": 6}, {"x": 10, "y": 10}]}
+        nav = Navigator(routes)
+        # Player at (5, 5), first waypoint at (5, 6) -> dist=1
+        # stuck_turns=8, dist<=3, not last waypoint -> skip
+        state = OverworldState(map_id=10, x=5, y=5)
+        result = nav.next_direction(state, stuck_turns=8)
+        # Should have skipped first waypoint and now be navigating to second
+        assert nav.current_waypoint == 1
+        assert result is not None
+
+
+# ===================================================================
+# update_overworld_progress -- lines 426, 452
+# ===================================================================
+
+
+class TestUpdateOverworldProgressUncovered:
+    """Cover door cooldown on interior exit (426) and Viridian milestone (452)."""
+
+    def test_door_cooldown_on_interior_exit_map37(self, tmp_path):
+        """Line 426: exiting map 37 to map 0 sets door_cooldown = 8."""
+        ag = _make_agent(tmp_path)
+        ag.last_overworld_state = OverworldState(map_id=37, x=3, y=9)
+        state = OverworldState(map_id=0, x=5, y=5)
+        ag.update_overworld_progress(state)
+        assert ag.door_cooldown == 8
+
+    def test_door_cooldown_on_interior_exit_map38(self, tmp_path):
+        """Line 426: exiting map 38 to map 0 sets door_cooldown = 8."""
+        ag = _make_agent(tmp_path)
+        ag.last_overworld_state = OverworldState(map_id=38, x=7, y=1)
+        state = OverworldState(map_id=0, x=5, y=5)
+        ag.update_overworld_progress(state)
+        assert ag.door_cooldown == 8
+
+    def test_door_cooldown_on_interior_exit_map40(self, tmp_path):
+        """Line 426: exiting map 40 to map 0 sets door_cooldown = 8."""
+        ag = _make_agent(tmp_path)
+        ag.last_overworld_state = OverworldState(map_id=40, x=5, y=5)
+        state = OverworldState(map_id=0, x=5, y=5)
+        ag.update_overworld_progress(state)
+        assert ag.door_cooldown == 8
+
+    def test_no_door_cooldown_on_non_interior_exit(self, tmp_path):
+        """Line 426 not hit: exiting map 12 to map 0 does not set cooldown."""
+        ag = _make_agent(tmp_path)
+        ag.last_overworld_state = OverworldState(map_id=12, x=5, y=5)
+        state = OverworldState(map_id=0, x=5, y=5)
+        ag.update_overworld_progress(state)
+        assert ag.door_cooldown == 0
+
+    def test_viridian_city_milestone_fires_on_first_visit(self, tmp_path):
+        """Line 415: milestone log fires when map 1 is visited for the first time."""
+        ag = _make_agent(tmp_path)
+        ag.last_overworld_state = OverworldState(map_id=0, x=5, y=0)
+        ag.maps_visited = {0}
+        state = OverworldState(map_id=1, x=5, y=35)
+        ag.update_overworld_progress(state)
+        assert any("MILESTONE" in e for e in ag.events)
+
+
+# ===================================================================
+# choose_overworld_action -- door cooldown phases (461-467)
+# ===================================================================
+
+
+class TestDoorCooldownPhases:
+    """Cover lines 461-467: door cooldown phases."""
+
+    def test_door_cooldown_high_returns_a(self, tmp_path):
+        """Lines 462-464: cooldown >= 6 -> wait + return 'a'."""
+        ag = _make_agent(tmp_path)
+        ag.door_cooldown = 7  # will be decremented to 6, >= 6
+        ag.controller = MagicMock()
+        state = OverworldState(map_id=0, x=5, y=5)
+        result = ag.choose_overworld_action(state)
+        assert result == "a"
+        ag.controller.wait.assert_called_once_with(60)
+
+    def test_door_cooldown_mid_returns_down(self, tmp_path):
+        """Lines 465-466: cooldown >= 3 -> return 'down'."""
+        ag = _make_agent(tmp_path)
+        ag.door_cooldown = 4  # decremented to 3, >= 3
+        state = OverworldState(map_id=0, x=5, y=5)
+        result = ag.choose_overworld_action(state)
+        assert result == "down"
+
+    def test_door_cooldown_low_returns_left(self, tmp_path):
+        """Line 467: cooldown < 3 -> return 'left'."""
+        ag = _make_agent(tmp_path)
+        ag.door_cooldown = 2  # decremented to 1, < 3
+        state = OverworldState(map_id=0, x=5, y=5)
+        result = ag.choose_overworld_action(state)
+        assert result == "left"
+
+
+# ===================================================================
+# choose_overworld_action -- Oak's Lab phases (494-514, 521)
+# ===================================================================
+
+
+class TestOaksLabPhases:
+    """Cover lab phases 0->1->2 with no Pokemon and lab with Pokemon."""
+
+    def test_lab_phase0_y_ge_4_transitions_to_phase1(self, tmp_path):
+        """Lines 493-496: phase 0, y>=4 -> transition to phase 1, return 'right'."""
+        ag = _make_agent(tmp_path)
+        with patch.object(agent, "Image", None):
+            state = OverworldState(map_id=40, party_count=0, x=3, y=4)
+            result = ag.choose_overworld_action(state)
+        assert result == "right"
+        assert ag._lab_phase == 1
+        assert any("phase 0" in e for e in ag.events)
+
+    def test_lab_phase0_odd_turn_returns_b(self, tmp_path):
+        """Lines 497-498: phase 0, _lab_turns odd -> return 'b'."""
+        ag = _make_agent(tmp_path)
+        ag._lab_turns = 0  # will be incremented to 1 (odd)
+        ag._lab_phase = 0
+        with patch.object(agent, "Image", None):
+            state = OverworldState(map_id=40, party_count=0, x=3, y=2)
+            result = ag.choose_overworld_action(state)
+        assert result == "b"
+
+    def test_lab_phase0_even_turn_returns_down(self, tmp_path):
+        """Lines 498-499: phase 0, _lab_turns even -> return 'down'."""
+        ag = _make_agent(tmp_path)
+        ag._lab_turns = 1  # will be incremented to 2 (even)
+        ag._lab_phase = 0
+        with patch.object(agent, "Image", None):
+            state = OverworldState(map_id=40, party_count=0, x=3, y=2)
+            result = ag.choose_overworld_action(state)
+        assert result == "down"
+
+    def test_lab_phase1_x_ge_6_transitions_to_phase2(self, tmp_path):
+        """Lines 503-506: phase 1, x>=6 -> transition to phase 2, return 'up'."""
+        ag = _make_agent(tmp_path)
+        ag._lab_phase = 1
+        ag._lab_turns = 0
+        with patch.object(agent, "Image", None):
+            state = OverworldState(map_id=40, party_count=0, x=6, y=4)
+            result = ag.choose_overworld_action(state)
+        assert result == "up"
+        assert ag._lab_phase == 2
+        assert any("phase 1" in e for e in ag.events)
+
+    def test_lab_phase1_x_lt_6_returns_right(self, tmp_path):
+        """Line 507: phase 1, x<6 -> return 'right'."""
+        ag = _make_agent(tmp_path)
+        ag._lab_phase = 1
+        ag._lab_turns = 0
+        with patch.object(agent, "Image", None):
+            state = OverworldState(map_id=40, party_count=0, x=4, y=4)
+            result = ag.choose_overworld_action(state)
+        assert result == "right"
+
+    def test_lab_phase2_even_turn_returns_up(self, tmp_path):
+        """Lines 512-513: phase 2, _lab_turns even -> return 'up'."""
+        ag = _make_agent(tmp_path)
+        ag._lab_phase = 2
+        ag._lab_turns = 1  # incremented to 2 (even)
+        with patch.object(agent, "Image", None):
+            state = OverworldState(map_id=40, party_count=0, x=6, y=4)
+            result = ag.choose_overworld_action(state)
+        assert result == "up"
+
+    def test_lab_phase2_odd_turn_returns_a(self, tmp_path):
+        """Line 514: phase 2, _lab_turns odd -> return 'a'."""
+        ag = _make_agent(tmp_path)
+        ag._lab_phase = 2
+        ag._lab_turns = 0  # incremented to 1 (odd)
+        with patch.object(agent, "Image", None):
+            state = OverworldState(map_id=40, party_count=0, x=6, y=4)
+            result = ag.choose_overworld_action(state)
+        assert result == "a"
+
+    def test_lab_with_pokemon_turn_div3_returns_down(self, tmp_path):
+        """Line 519-520: map 40, party>0, turn_count % 3 == 0 -> 'down'."""
+        ag = _make_agent(tmp_path)
+        ag.turn_count = 9  # 9 % 3 == 0
+        state = OverworldState(map_id=40, party_count=1, x=5, y=5)
+        result = ag.choose_overworld_action(state)
+        assert result == "down"
+
+    def test_lab_with_pokemon_turn_not_div3_returns_a(self, tmp_path):
+        """Line 521: map 40, party>0, turn_count % 3 != 0 -> 'a'."""
+        ag = _make_agent(tmp_path)
+        ag.turn_count = 10  # 10 % 3 == 1
+        state = OverworldState(map_id=40, party_count=1, x=5, y=5)
+        result = ag.choose_overworld_action(state)
+        assert result == "a"
+
+
+# ===================================================================
+# run_overworld -- House 1F diagnostic (651-654)
+# ===================================================================
+
+
+class TestRunOverworldHouseDiag:
+    """Cover lines 651-654: House 1F diagnostic on first visit."""
+
+    def test_house_1f_diagnostic_on_first_visit(self, tmp_path):
+        """Lines 651-654: map 37, first visit -> screenshot + collision log."""
+        ag = _make_agent(tmp_path)
+        state = OverworldState(map_id=37, x=3, y=5)
+        ag.memory.read_overworld_state = MagicMock(return_value=state)
+        ag.controller = MagicMock()
+        ag.collision_map = MagicMock()
+        ag.collision_map.grid = [[1] * 10 for _ in range(9)]
+        ag.collision_map.to_ascii.return_value = "...\n...\n"
+        ag.turn_count = 1
+
+        with patch.object(agent, "Image", None):
+            ag.run_overworld()
+
+        assert hasattr(ag, '_house_diag_done')
+        assert ag._house_diag_done is True
+        assert any("DIAG | House 1F" in e for e in ag.events)
+
+    def test_house_1f_diagnostic_only_once(self, tmp_path):
+        """Lines 651-654: second visit to map 37 does not re-trigger."""
+        ag = _make_agent(tmp_path)
+        ag._house_diag_done = True  # already done
+        state = OverworldState(map_id=37, x=3, y=5)
+        ag.memory.read_overworld_state = MagicMock(return_value=state)
+        ag.controller = MagicMock()
+        ag.collision_map = MagicMock()
+        ag.collision_map.grid = [[1] * 10 for _ in range(9)]
+        ag.turn_count = 1
+
+        ag.run_overworld()
+
+        # No DIAG event since _house_diag_done was already True
+        assert not any("DIAG | House 1F" in e for e in ag.events)
+
+
+# ===================================================================
+# run_overworld -- Pallet Town Oak trigger (658-692)
+# ===================================================================
+
+
+class TestRunOverworldOakTrigger:
+    """Cover lines 658-692: Pallet Town Oak trigger diagnostic."""
+
+    def test_pallet_diag_at_y_le_3_no_party(self, tmp_path):
+        """Lines 658-668: map 0, y<=3, no party -> diagnostic log + screenshot."""
+        ag = _make_agent(tmp_path)
+        state = OverworldState(map_id=0, x=5, y=3, party_count=0)
+        ag.memory.read_overworld_state = MagicMock(return_value=state)
+        ag.controller = MagicMock()
+        ag.collision_map = MagicMock()
+        ag.collision_map.grid = [[1] * 10 for _ in range(9)]
+        ag.turn_count = 5  # 5 % 5 == 0 -> triggers log
+
+        with patch.object(agent, "Image", None):
+            ag.run_overworld()
+
+        assert hasattr(ag, '_pallet_diag_done')
+        assert ag._pallet_diag_done is True
+        assert any("DIAG | Pallet" in e for e in ag.events)
+
+    def test_oak_wait_at_y_le_1(self, tmp_path):
+        """Lines 672-692: map 0, y<=1, no party -> Oak wait sequence."""
+        ag = _make_agent(tmp_path)
+        state = OverworldState(map_id=0, x=5, y=1, party_count=0)
+        post_wait_state = OverworldState(map_id=40, x=5, y=3, party_count=0)
+        ag.memory.read_overworld_state = MagicMock(side_effect=[state, post_wait_state])
+        ag.controller = MagicMock()
+        ag.collision_map = MagicMock()
+        ag.collision_map.grid = [[1] * 10 for _ in range(9)]
+        ag.turn_count = 5  # divisible by 5
+
+        with patch.object(agent, "Image", None):
+            ag.run_overworld()
+
+        assert hasattr(ag, '_oak_wait_done')
+        assert ag._oak_wait_done is True
+        assert any("OAK TRIGGER" in e for e in ag.events)
+        # Should have called wait(600) for Oak walk
+        ag.controller.wait.assert_any_call(600)
+        # Should have called mash_a 4 times
+        assert ag.controller.mash_a.call_count == 4
+
+    def test_oak_wait_only_once(self, tmp_path):
+        """Lines 673: _oak_wait_done already set -> skip Oak sequence."""
+        ag = _make_agent(tmp_path)
+        ag._oak_wait_done = True
+        ag._pallet_diag_done = True
+        state = OverworldState(map_id=0, x=5, y=1, party_count=0)
+        ag.memory.read_overworld_state = MagicMock(return_value=state)
+        ag.controller = MagicMock()
+        ag.collision_map = MagicMock()
+        ag.collision_map.grid = [[1] * 10 for _ in range(9)]
+        ag.turn_count = 5
+
+        with patch.object(agent, "Image", None):
+            ag.run_overworld()
+
+        # No wait(600) call since _oak_wait_done was already True
+        calls = [c for c in ag.controller.wait.call_args_list if c == call(600)]
+        assert len(calls) == 0
+
+    def test_pallet_diag_no_log_at_non_5_turn(self, tmp_path):
+        """Line 661: turn_count % 5 != 0 -> no DIAG log."""
+        ag = _make_agent(tmp_path)
+        state = OverworldState(map_id=0, x=5, y=3, party_count=0)
+        ag.memory.read_overworld_state = MagicMock(return_value=state)
+        ag.controller = MagicMock()
+        ag.collision_map = MagicMock()
+        ag.collision_map.grid = [[1] * 10 for _ in range(9)]
+        ag.turn_count = 7  # 7 % 5 != 0
+
+        with patch.object(agent, "Image", None):
+            ag.run_overworld()
+
+        # _pallet_diag_done still set (screenshot unconditional), but no DIAG log
+        diag_logs = [e for e in ag.events if "DIAG | Pallet" in e]
+        assert len(diag_logs) == 0
+
+
+# ===================================================================
+# run_overworld -- B-button dispatch (699-700)
+# ===================================================================
+
+
+class TestRunOverworldBButton:
+    """Cover lines 699-700: action == 'b' -> press B."""
+
+    def test_b_action_presses_b(self, tmp_path):
+        """Lines 698-700: action='b' dispatches press('b', ...)."""
+        ag = _make_agent(tmp_path)
+        state = OverworldState(map_id=99, x=5, y=5)
+        ag.memory.read_overworld_state = MagicMock(return_value=state)
+        ag.choose_overworld_action = MagicMock(return_value="b")
+        ag.controller = MagicMock()
+        ag.turn_count = 1
+
+        ag.run_overworld()
+
+        ag.controller.press.assert_called_once_with("b", hold_frames=20, release_frames=12)
+        ag.controller.wait.assert_called_once_with(24)
+        assert ag.last_overworld_action == "b"
+
+
+# ===================================================================
+# run_overworld -- Waypoint info logging (711-715)
+# ===================================================================
+
+
+class TestRunOverworldWaypointLogging:
+    """Cover lines 711-715: waypoint info in OVERWORLD log."""
+
+    def test_waypoint_info_in_log(self, tmp_path):
+        """Lines 710-715: route exists, waypoint available -> WP info in log."""
+        routes = {"12": {"waypoints": [{"x": 8, "y": 10}, {"x": 8, "y": 4}]}}
+        ag = _make_agent(tmp_path, routes=routes)
+        state = OverworldState(map_id=12, x=5, y=10, badges=0, party_count=1)
+        ag.memory.read_overworld_state = MagicMock(return_value=state)
+        ag.choose_overworld_action = MagicMock(return_value="down")
+        ag.controller = MagicMock()
+        ag.turn_count = 50  # 50 % 50 == 0 -> logs
+        # Set navigator map state
+        ag.navigator.current_map = "12"
+        ag.navigator.current_waypoint = 0
+
+        ag.run_overworld()
+
+        overworld_logs = [e for e in ag.events if "OVERWORLD" in e]
+        assert len(overworld_logs) == 1
+        assert "WP: 0" in overworld_logs[0]
+        assert "(8,10)" in overworld_logs[0]
+
+    def test_waypoint_info_list_route_format(self, tmp_path):
+        """Lines 711-715: route as plain list (not dict with 'waypoints')."""
+        routes = {"12": [{"x": 8, "y": 10}]}
+        ag = _make_agent(tmp_path, routes=routes)
+        state = OverworldState(map_id=12, x=5, y=10, badges=0, party_count=1)
+        ag.memory.read_overworld_state = MagicMock(return_value=state)
+        ag.choose_overworld_action = MagicMock(return_value="down")
+        ag.controller = MagicMock()
+        ag.turn_count = 50
+        ag.navigator.current_map = "12"
+        ag.navigator.current_waypoint = 0
+
+        ag.run_overworld()
+
+        overworld_logs = [e for e in ag.events if "OVERWORLD" in e]
+        assert len(overworld_logs) == 1
+        assert "WP:" in overworld_logs[0]
+
+    def test_no_waypoint_info_when_past_all_waypoints(self, tmp_path):
+        """Lines 713 guard: current_waypoint >= len -> no WP info."""
+        routes = {"12": [{"x": 8, "y": 10}]}
+        ag = _make_agent(tmp_path, routes=routes)
+        state = OverworldState(map_id=12, x=5, y=10, badges=0, party_count=1)
+        ag.memory.read_overworld_state = MagicMock(return_value=state)
+        ag.choose_overworld_action = MagicMock(return_value="down")
+        ag.controller = MagicMock()
+        ag.turn_count = 50
+        ag.navigator.current_map = "12"
+        ag.navigator.current_waypoint = 5  # past all waypoints
+
+        ag.run_overworld()
+
+        overworld_logs = [e for e in ag.events if "OVERWORLD" in e]
+        assert len(overworld_logs) == 1
+        assert "WP:" not in overworld_logs[0]
