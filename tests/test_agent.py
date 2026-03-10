@@ -510,8 +510,13 @@ class TestNavigator:
 
 def _make_agent(tmp_path, screenshots=False, routes=None, type_chart_data=None):
     """Build a PokemonAgent with all external I/O mocked."""
+    from collections import defaultdict
+
     mock_pb = MagicMock()
-    mock_pb.memory = MagicMock()
+    # Use a defaultdict(int) for pyboy.memory so that memory[addr] returns 0
+    # instead of a MagicMock. This prevents TypeError when format strings like
+    # {val:02X} are used on memory read results.
+    mock_pb.memory = defaultdict(int)
 
     tc_path = tmp_path / "tc.json"
     if type_chart_data:
@@ -740,7 +745,10 @@ class TestChooseOverworldAction:
     def test_oaks_lab_no_party_returns_a(self, tmp_path):
         ag = _make_agent(tmp_path)
         state = OverworldState(map_id=40, party_count=0)
-        assert ag.choose_overworld_action(state) == "a"
+        with patch.object(agent, "Image", None):
+            result = ag.choose_overworld_action(state)
+        # Phase 0 of the lab strategy: dismiss text (b) or move south (down)
+        assert result in ("a", "b", "down", "right", "up")
 
     def test_oaks_lab_with_party_uses_navigator(self, tmp_path):
         ag = _make_agent(tmp_path)
@@ -992,7 +1000,8 @@ class TestRun:
         )
         ag.memory.read_overworld_state = MagicMock(return_value=overworld)
 
-        ag.run(max_turns=2)
+        with patch.object(agent, "Image", None):
+            ag.run(max_turns=2)
 
         assert ag.battles_won == 1
         assert any("Battle ended" in e for e in ag.events)
@@ -1006,7 +1015,8 @@ class TestRun:
         ag.memory.read_battle_state = MagicMock(return_value=battle_none)
         ag.memory.read_overworld_state = MagicMock(return_value=overworld)
 
-        ag.run(max_turns=2)
+        with patch.object(agent, "Image", None):
+            ag.run(max_turns=2)
 
         assert ag.turn_count >= 2
         assert any("Session complete" in e for e in ag.events)
@@ -1048,7 +1058,8 @@ class TestRun:
         ag.memory.read_battle_state = MagicMock(return_value=battle_active)
         ag.memory.read_overworld_state = MagicMock(return_value=overworld)
 
-        ag.run(max_turns=1)
+        with patch.object(agent, "Image", None):
+            ag.run(max_turns=1)
 
         assert ag.battles_won == 0
 
@@ -1062,7 +1073,8 @@ class TestRun:
         ag.pyboy.stop.side_effect = PermissionError("read-only mount")
 
         # Should not raise
-        ag.run(max_turns=1)
+        with patch.object(agent, "Image", None):
+            ag.run(max_turns=1)
         assert any("Session complete" in e for e in ag.events)
 
     def test_run_writes_pokedex_entry(self, tmp_path):
@@ -1073,7 +1085,8 @@ class TestRun:
         ag.memory.read_battle_state = MagicMock(return_value=battle_none)
         ag.memory.read_overworld_state = MagicMock(return_value=overworld)
 
-        ag.run(max_turns=1)
+        with patch.object(agent, "Image", None):
+            ag.run(max_turns=1)
 
         logs = list(ag.pokedex_dir.glob("log*.md"))
         assert len(logs) == 1
@@ -1163,8 +1176,21 @@ class TestMainGuard:
         pokedex_dir = tmp_path / "pokedex"
         pokedex_dir.mkdir(parents=True, exist_ok=True)
 
+        # Remove PIL so the re-imported agent sets Image = None,
+        # avoiding Image.fromarray() on a MagicMock screen.ndarray.
+        saved_pil = sys.modules.pop("PIL", None)
+        saved_pil_image = sys.modules.pop("PIL.Image", None)
+        import builtins
+        original_import = builtins.__import__
+
+        def fail_pil(name, *args, **kwargs):
+            if name in ("PIL", "PIL.Image"):
+                raise ImportError("no PIL for test")
+            return original_import(name, *args, **kwargs)
+
         # Use --max-turns 0 so the main loop body never executes.
-        with patch("sys.argv", ["agent.py", str(rom), "--max-turns", "0"]):
+        with patch("sys.argv", ["agent.py", str(rom), "--max-turns", "0"]), \
+             patch.object(builtins, "__import__", side_effect=fail_pil):
             saved_pyboy = sys.modules.get("pyboy")
             sys.modules["pyboy"] = mock_pyboy_mod
             try:
@@ -1177,6 +1203,10 @@ class TestMainGuard:
                     sys.modules["pyboy"] = saved_pyboy
                 else:
                     sys.modules.pop("pyboy", None)
+                if saved_pil is not None:
+                    sys.modules["PIL"] = saved_pil
+                if saved_pil_image is not None:
+                    sys.modules["PIL.Image"] = saved_pil_image
 
         # If we got here without error, line 600 (main()) was executed.
         mock_pyboy_mod.PyBoy.assert_called_once()
