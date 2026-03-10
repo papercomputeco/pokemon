@@ -63,6 +63,24 @@ class TapeSession:
     end_time: str = ""
 
 
+# Recursive CTE that walks the parent_hash chain from a root node.
+# Used by both read_session (fetchall) and iter_entries (cursor iteration).
+_CHAIN_QUERY = (
+    "WITH RECURSIVE chain(h) AS ("
+    "  SELECT ? "
+    "  UNION ALL "
+    "  SELECT n.hash FROM nodes n "
+    "  JOIN chain ON n.parent_hash = chain.h"
+    ") "
+    "SELECT n.hash, n.role, n.content, n.created_at, "
+    "  n.prompt_tokens, n.completion_tokens, "
+    "  n.cache_creation_input_tokens, n.cache_read_input_tokens, "
+    "  n.parent_hash, n.model, n.agent_name "
+    "FROM chain JOIN nodes n ON n.hash = chain.h "
+    "ORDER BY n.created_at"
+)
+
+
 class TapeReader:
     """Reads and parses the Tapes SQLite database."""
 
@@ -86,21 +104,7 @@ class TapeReader:
         """Walk the parent_hash chain from a root node into a TapeSession."""
         conn = sqlite3.connect(str(self.db_path))
         try:
-            rows = conn.execute(
-                "WITH RECURSIVE chain(h) AS ("
-                "  SELECT ? "
-                "  UNION ALL "
-                "  SELECT n.hash FROM nodes n "
-                "  JOIN chain ON n.parent_hash = chain.h"
-                ") "
-                "SELECT n.hash, n.role, n.content, n.created_at, "
-                "  n.prompt_tokens, n.completion_tokens, "
-                "  n.cache_creation_input_tokens, n.cache_read_input_tokens, "
-                "  n.parent_hash, n.model, n.agent_name "
-                "FROM chain JOIN nodes n ON n.hash = chain.h "
-                "ORDER BY n.created_at",
-                (root_hash,),
-            ).fetchall()
+            rows = conn.execute(_CHAIN_QUERY, (root_hash,)).fetchall()
         finally:
             conn.close()
 
@@ -118,21 +122,7 @@ class TapeReader:
         """Lazy generator over entries in a conversation chain."""
         conn = sqlite3.connect(str(self.db_path))
         try:
-            cursor = conn.execute(
-                "WITH RECURSIVE chain(h) AS ("
-                "  SELECT ? "
-                "  UNION ALL "
-                "  SELECT n.hash FROM nodes n "
-                "  JOIN chain ON n.parent_hash = chain.h"
-                ") "
-                "SELECT n.hash, n.role, n.content, n.created_at, "
-                "  n.prompt_tokens, n.completion_tokens, "
-                "  n.cache_creation_input_tokens, n.cache_read_input_tokens, "
-                "  n.parent_hash, n.model, n.agent_name "
-                "FROM chain JOIN nodes n ON n.hash = chain.h "
-                "ORDER BY n.created_at",
-                (root_hash,),
-            )
+            cursor = conn.execute(_CHAIN_QUERY, (root_hash,))
             for row in cursor:
                 yield self._row_to_entry(row)
         finally:

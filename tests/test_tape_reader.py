@@ -1,10 +1,10 @@
 """Tests for tape_reader.py — 100% coverage."""
 
 import json
-import sqlite3
 
 import pytest
 
+from tape_helpers import create_test_db, insert_test_node
 from tape_reader import (
     TapeEntry,
     TapeReader,
@@ -15,42 +15,6 @@ from tape_reader import (
     _summarize_tool_input,
     _parse_content_blob,
 )
-
-
-def _create_db(path):
-    """Create a tapes.sqlite with the nodes schema."""
-    conn = sqlite3.connect(str(path))
-    conn.execute(
-        "CREATE TABLE nodes ("
-        "  hash TEXT PRIMARY KEY,"
-        "  role TEXT,"
-        "  content JSON,"
-        "  created_at DATETIME,"
-        "  prompt_tokens INTEGER,"
-        "  completion_tokens INTEGER,"
-        "  cache_creation_input_tokens INTEGER,"
-        "  cache_read_input_tokens INTEGER,"
-        "  parent_hash TEXT,"
-        "  model TEXT,"
-        "  agent_name TEXT"
-        ")"
-    )
-    conn.commit()
-    return conn
-
-
-def _insert_node(conn, hash_val, role="user", content=None, created_at="2026-03-09T10:00:00Z",
-                 prompt_tokens=None, completion_tokens=None, cache_creation=None,
-                 cache_read=None, parent_hash=None, model=None, agent_name=None):
-    """Insert a node into the test database."""
-    content_json = json.dumps(content) if content is not None else None
-    conn.execute(
-        "INSERT INTO nodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (hash_val, role, content_json, created_at,
-         prompt_tokens, completion_tokens, cache_creation, cache_read,
-         parent_hash, model, agent_name),
-    )
-    conn.commit()
 
 
 # ── Dataclass defaults ──────────────────────────────────────────────
@@ -146,13 +110,13 @@ class TestParseContentBlob:
 class TestRowToEntry:
     def _make_reader(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         return TapeReader(str(db_path))
 
     def test_user_text_message(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        conn = _create_db(db_path)
-        _insert_node(conn, "h1", role="user",
+        conn = create_test_db(db_path)
+        insert_test_node(conn, "h1", role="user",
                       content=[{"type": "text", "text": "do something"}])
 
         reader = TapeReader(str(db_path))
@@ -164,8 +128,8 @@ class TestRowToEntry:
 
     def test_assistant_with_tool_use(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        conn = _create_db(db_path)
-        _insert_node(conn, "h1", role="assistant",
+        conn = create_test_db(db_path)
+        insert_test_node(conn, "h1", role="assistant",
                       content=[
                           {"type": "text", "text": "Let me read that."},
                           {"type": "tool_use", "tool_use_id": "tu-1",
@@ -187,8 +151,8 @@ class TestRowToEntry:
 
     def test_user_with_tool_result(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        conn = _create_db(db_path)
-        _insert_node(conn, "h1", role="user",
+        conn = create_test_db(db_path)
+        insert_test_node(conn, "h1", role="user",
                       content=[
                           {"type": "tool_result", "tool_use_id": "tu-1",
                            "content": "file contents", "is_error": False},
@@ -203,8 +167,8 @@ class TestRowToEntry:
 
     def test_user_with_error_tool_result(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        conn = _create_db(db_path)
-        _insert_node(conn, "h1", role="user",
+        conn = create_test_db(db_path)
+        insert_test_node(conn, "h1", role="user",
                       content=[
                           {"type": "tool_result", "tool_use_id": "tu-1",
                            "content": "command failed", "is_error": True},
@@ -216,8 +180,8 @@ class TestRowToEntry:
 
     def test_tool_result_with_list_content(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        conn = _create_db(db_path)
-        _insert_node(conn, "h1", role="user",
+        conn = create_test_db(db_path)
+        insert_test_node(conn, "h1", role="user",
                       content=[
                           {"type": "tool_result", "tool_use_id": "tu-1",
                            "content": [
@@ -232,8 +196,8 @@ class TestRowToEntry:
 
     def test_empty_role_node(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        conn = _create_db(db_path)
-        _insert_node(conn, "h1", role="", content=[])
+        conn = create_test_db(db_path)
+        insert_test_node(conn, "h1", role="", content=[])
 
         reader = TapeReader(str(db_path))
         entry = reader.read_session("h1").entries[0]
@@ -242,8 +206,8 @@ class TestRowToEntry:
 
     def test_null_role_node(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        conn = _create_db(db_path)
-        _insert_node(conn, "h1", role=None, content=None)
+        conn = create_test_db(db_path)
+        insert_test_node(conn, "h1", role=None, content=None)
 
         reader = TapeReader(str(db_path))
         entry = reader.read_session("h1").entries[0]
@@ -251,8 +215,8 @@ class TestRowToEntry:
 
     def test_null_tokens(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        conn = _create_db(db_path)
-        _insert_node(conn, "h1", role="assistant", content=[{"type": "text", "text": "hi"}])
+        conn = create_test_db(db_path)
+        insert_test_node(conn, "h1", role="assistant", content=[{"type": "text", "text": "hi"}])
 
         reader = TapeReader(str(db_path))
         entry = reader.read_session("h1").entries[0]
@@ -261,8 +225,8 @@ class TestRowToEntry:
 
     def test_raw_dict_populated(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        conn = _create_db(db_path)
-        _insert_node(conn, "h1", role="user", content=[], model="claude-opus-4-6",
+        conn = create_test_db(db_path)
+        insert_test_node(conn, "h1", role="user", content=[], model="claude-opus-4-6",
                       agent_name="claude", parent_hash="h0")
 
         reader = TapeReader(str(db_path))
@@ -326,17 +290,17 @@ class TestSummarizeToolInput:
 class TestTapeReaderListSessions:
     def test_empty_db(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         reader = TapeReader(str(db_path))
         assert reader.list_sessions() == []
 
     def test_finds_root_nodes(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        conn = _create_db(db_path)
-        _insert_node(conn, "root1", role="user", content=[], created_at="2026-01-01T00:00:00Z")
-        _insert_node(conn, "child1", role="assistant", content=[], parent_hash="root1",
+        conn = create_test_db(db_path)
+        insert_test_node(conn, "root1", role="user", content=[], created_at="2026-01-01T00:00:00Z")
+        insert_test_node(conn, "child1", role="assistant", content=[], parent_hash="root1",
                       created_at="2026-01-01T00:01:00Z")
-        _insert_node(conn, "root2", role="user", content=[], created_at="2026-01-02T00:00:00Z")
+        insert_test_node(conn, "root2", role="user", content=[], created_at="2026-01-02T00:00:00Z")
 
         reader = TapeReader(str(db_path))
         sessions = reader.list_sessions()
@@ -344,9 +308,9 @@ class TestTapeReaderListSessions:
 
     def test_ordered_by_time(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        conn = _create_db(db_path)
-        _insert_node(conn, "later", role="user", content=[], created_at="2026-01-02T00:00:00Z")
-        _insert_node(conn, "earlier", role="user", content=[], created_at="2026-01-01T00:00:00Z")
+        conn = create_test_db(db_path)
+        insert_test_node(conn, "later", role="user", content=[], created_at="2026-01-02T00:00:00Z")
+        insert_test_node(conn, "earlier", role="user", content=[], created_at="2026-01-01T00:00:00Z")
 
         reader = TapeReader(str(db_path))
         assert reader.list_sessions() == ["earlier", "later"]
@@ -355,11 +319,11 @@ class TestTapeReaderListSessions:
 class TestTapeReaderReadSession:
     def test_basic_chain(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        conn = _create_db(db_path)
-        _insert_node(conn, "h1", role="user",
+        conn = create_test_db(db_path)
+        insert_test_node(conn, "h1", role="user",
                       content=[{"type": "text", "text": "hi"}],
                       created_at="2026-01-01T00:00:00Z")
-        _insert_node(conn, "h2", role="assistant",
+        insert_test_node(conn, "h2", role="assistant",
                       content=[{"type": "text", "text": "hello"}],
                       created_at="2026-01-01T00:01:00Z",
                       parent_hash="h1")
@@ -373,8 +337,8 @@ class TestTapeReaderReadSession:
 
     def test_single_node_session(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        conn = _create_db(db_path)
-        _insert_node(conn, "h1", role="user", content=[{"type": "text", "text": "solo"}])
+        conn = create_test_db(db_path)
+        insert_test_node(conn, "h1", role="user", content=[{"type": "text", "text": "solo"}])
 
         reader = TapeReader(str(db_path))
         session = reader.read_session("h1")
@@ -384,7 +348,7 @@ class TestTapeReaderReadSession:
     def test_empty_session(self, tmp_path):
         """Reading a hash that doesn't exist returns empty session."""
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         reader = TapeReader(str(db_path))
         session = reader.read_session("nonexistent")
         assert session.entries == []
@@ -395,11 +359,11 @@ class TestTapeReaderReadSession:
 class TestTapeReaderIterEntries:
     def test_generator_behavior(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        conn = _create_db(db_path)
-        _insert_node(conn, "h1", role="user",
+        conn = create_test_db(db_path)
+        insert_test_node(conn, "h1", role="user",
                       content=[{"type": "text", "text": "line1"}],
                       created_at="2026-01-01T00:00:00Z")
-        _insert_node(conn, "h2", role="assistant",
+        insert_test_node(conn, "h2", role="assistant",
                       content=[{"type": "text", "text": "line2"}],
                       created_at="2026-01-01T00:01:00Z",
                       parent_hash="h1")
@@ -415,7 +379,7 @@ class TestTapeReaderIterEntries:
 
     def test_empty_chain(self, tmp_path):
         db_path = tmp_path / "tapes.sqlite"
-        _create_db(db_path)
+        create_test_db(db_path)
         reader = TapeReader(str(db_path))
         entries = list(reader.iter_entries("nonexistent"))
         assert entries == []
