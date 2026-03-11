@@ -1,0 +1,329 @@
+#!/usr/bin/env python3
+"""AlphaEvolve-inspired strategy evolution for the Pokemon agent.
+
+Runs the agent headless, collects fitness metrics, uses an LLM to propose
+parameter variants, and keeps improvements. Starts with navigator knobs
+(numeric thresholds) rather than full function rewrites.
+
+Usage:
+    uv run scripts/evolve.py <rom> --generations 5 --max-turns 200
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from dataclasses import dataclass, field
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).parent
+
+# ---------------------------------------------------------------------------
+# Genome: evolvable navigator parameters
+# ---------------------------------------------------------------------------
+
+DEFAULT_PARAMS = {
+    "stuck_threshold": 8,
+    "door_cooldown": 8,
+    "waypoint_skip_distance": 3,
+    "axis_preference_map_0": "y",
+    "bt_max_snapshots": 8,
+    "bt_restore_threshold": 15,
+    "bt_max_attempts": 3,
+    "bt_snapshot_interval": 50,
+}
+
+
+@dataclass
+class EvolutionResult:
+    """Outcome of a single generation."""
+
+    generation: int = 0
+    params: dict = field(default_factory=dict)
+    fitness: dict = field(default_factory=dict)
+    score: float = 0.0
+    improved: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Fitness scoring
+# ---------------------------------------------------------------------------
+
+
+def score(fitness: dict) -> float:
+    """Composite fitness score weighted toward navigation progress."""
+    return (
+        fitness.get("final_map_id", 0) * 1000
+        + fitness.get("badges", 0) * 5000
+        + fitness.get("party_size", 0) * 500
+        + fitness.get("battles_won", 0) * 10
+        - fitness.get("stuck_count", 0) * 5
+        - fitness.get("turns", 0) * 0.1
+        - fitness.get("backtrack_restores", 0) * 2
+    )
+
+
+# ---------------------------------------------------------------------------
+# Agent runner (subprocess isolation)
+# ---------------------------------------------------------------------------
+
+
+def run_agent(rom_path: str, max_turns: int, params: dict) -> dict:
+    """Run the agent in a subprocess and return fitness metrics.
+
+    Passes params as the EVOLVE_PARAMS env var (JSON). The agent reads
+    this to override navigator defaults.
+    """
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
+        output_path = f.name
+
+    env = os.environ.copy()
+    env["EVOLVE_PARAMS"] = json.dumps(params)
+
+    cmd = [
+        sys.executable,
+        str(SCRIPT_DIR / "agent.py"),
+        rom_path,
+        "--max-turns",
+        str(max_turns),
+        "--output-json",
+        output_path,
+    ]
+
+    try:
+        subprocess.run(cmd, env=env, capture_output=True, timeout=600)
+        fitness = json.loads(Path(output_path).read_text())
+    except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
+        fitness = {
+            "turns": max_turns,
+            "battles_won": 0,
+            "maps_visited": 0,
+            "final_map_id": 0,
+            "final_x": 0,
+            "final_y": 0,
+            "badges": 0,
+            "party_size": 0,
+            "stuck_count": max_turns,
+        }
+    finally:
+        try:
+            os.unlink(output_path)
+        except OSError:
+            pass
+
+    return fitness
+
+
+# ---------------------------------------------------------------------------
+# LLM variant proposal
+# ---------------------------------------------------------------------------
+
+
+def build_mutation_prompt(
+    params: dict, fitness: dict, observations: list[dict] | None = None
+) -> str:
+    """Build a prompt asking the LLM to propose a parameter variant."""
+    obs_section = ""
+    if observations:
+        obs_lines = []
+        for o in observations:
+            obs_lines.append(f"  - [{o['priority']}] {o['content']}")
+        obs_section = "\nRecent observations:\n" + "\n".join(obs_lines) + "\n"
+
+    return f"""You are tuning navigation parameters for a Pokemon Red AI agent.
+
+Current parameters:
+{json.dumps(params, indent=2)}
+
+Current fitness:
+{json.dumps(fitness, indent=2)}
+
+Current score: {score(fitness):.1f}
+{obs_section}
+Parameter descriptions:
+- stuck_threshold: how many stuck turns before skipping a waypoint (int, 3-20)
+- door_cooldown: frames to walk away from a door after exiting (int, 4-16)
+- waypoint_skip_distance: max Manhattan distance to skip a waypoint when stuck (int, 1-8)
+- axis_preference_map_0: preferred movement axis on Pallet Town map ("x" or "y")
+- bt_max_snapshots: max number of backtrack snapshots to keep (int, 2-16)
+- bt_restore_threshold: stuck turns before restoring a snapshot (int, 8-30)
+- bt_max_attempts: max times to retry from the same snapshot (int, 1-5)
+- bt_snapshot_interval: turns between periodic snapshots when not stuck (int, 20-100)
+
+Propose ONE set of modified parameters to improve the score. Focus on reducing
+stuck_count and increasing maps_visited. Return ONLY valid JSON with the same
+keys, nothing else."""
+
+
+def parse_llm_response(response: str) -> dict | None:
+    """Extract a params dict from an LLM response. Returns None on failure."""
+    # Try to find JSON in the response
+    text = response.strip()
+    # Strip markdown code fences if present
+    if text.startswith("```"):
+        lines = text.split("\n")
+        lines = [l for l in lines if not l.startswith("```")]
+        text = "\n".join(lines).strip()
+
+    try:
+        params = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+    # Validate expected keys
+    for key in DEFAULT_PARAMS:
+        if key not in params:
+            return None
+
+    return params
+
+
+# ---------------------------------------------------------------------------
+# Evolution loop
+# ---------------------------------------------------------------------------
+
+
+def evolve(
+    rom_path: str,
+    max_generations: int = 5,
+    max_turns: int = 200,
+    llm_fn=None,
+    observer_fn=None,
+) -> list[EvolutionResult]:
+    """Run the evolution loop.
+
+    Args:
+        rom_path: Path to the Pokemon ROM.
+        max_generations: Number of generations to run.
+        max_turns: Max turns per agent run.
+        llm_fn: Callable(prompt) -> str. If None, uses random perturbation.
+        observer_fn: Callable() -> list[dict]. Returns observations for LLM context.
+
+    Returns:
+        List of EvolutionResult for each generation.
+    """
+    current_params = dict(DEFAULT_PARAMS)
+    results: list[EvolutionResult] = []
+
+    # Baseline run
+    baseline_fitness = run_agent(rom_path, max_turns, current_params)
+    baseline_score = score(baseline_fitness)
+    print(f"[evolve] Baseline score: {baseline_score:.1f}")
+    print(f"[evolve] Baseline fitness: {json.dumps(baseline_fitness)}")
+
+    for gen in range(max_generations):
+        print(f"\n[evolve] === Generation {gen + 1}/{max_generations} ===")
+
+        # Get observations if available
+        observations = observer_fn() if observer_fn else None
+
+        # Propose variant
+        if llm_fn:
+            prompt = build_mutation_prompt(
+                current_params, baseline_fitness, observations
+            )
+            response = llm_fn(prompt)
+            variant_params = parse_llm_response(response)
+            if variant_params is None:
+                print("[evolve] LLM returned invalid params, skipping generation")
+                results.append(
+                    EvolutionResult(
+                        generation=gen + 1,
+                        params=current_params,
+                        fitness=baseline_fitness,
+                        score=baseline_score,
+                        improved=False,
+                    )
+                )
+                continue
+        else:
+            # No LLM: use simple perturbation for testing
+            variant_params = _perturb(current_params)
+
+        print(f"[evolve] Variant params: {json.dumps(variant_params)}")
+
+        # Run variant
+        variant_fitness = run_agent(rom_path, max_turns, variant_params)
+        variant_score = score(variant_fitness)
+        print(f"[evolve] Variant score: {variant_score:.1f} (baseline: {baseline_score:.1f})")
+
+        improved = variant_score > baseline_score
+        if improved:
+            print("[evolve] Improvement found! Adopting variant.")
+            current_params = variant_params
+            baseline_fitness = variant_fitness
+            baseline_score = variant_score
+        else:
+            print("[evolve] No improvement. Keeping baseline.")
+
+        results.append(
+            EvolutionResult(
+                generation=gen + 1,
+                params=dict(current_params),
+                fitness=variant_fitness if improved else baseline_fitness,
+                score=variant_score if improved else baseline_score,
+                improved=improved,
+            )
+        )
+
+    print(f"\n[evolve] Final params: {json.dumps(current_params, indent=2)}")
+    print(f"[evolve] Final score: {baseline_score:.1f}")
+
+    return results
+
+
+def _perturb(params: dict) -> dict:
+    """Simple random perturbation of numeric params (no LLM needed)."""
+    import random
+
+    new = dict(params)
+    key = random.choice([
+        "stuck_threshold", "door_cooldown", "waypoint_skip_distance",
+        "bt_max_snapshots", "bt_restore_threshold", "bt_max_attempts",
+        "bt_snapshot_interval",
+    ])
+    delta = random.choice([-2, -1, 1, 2])
+    new[key] = max(1, new[key] + delta)
+    # Randomly flip axis preference
+    if random.random() < 0.3:
+        new["axis_preference_map_0"] = "x" if new["axis_preference_map_0"] == "y" else "y"
+    return new
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Evolve Pokemon agent parameters")
+    parser.add_argument("rom", help="Path to ROM file")
+    parser.add_argument(
+        "--generations",
+        type=int,
+        default=5,
+        help="Number of evolution generations (default: 5)",
+    )
+    parser.add_argument(
+        "--max-turns",
+        type=int,
+        default=200,
+        help="Max turns per agent run (default: 200)",
+    )
+    args = parser.parse_args()
+
+    if not Path(args.rom).exists():
+        print(f"ROM not found: {args.rom}")
+        sys.exit(1)
+
+    results = evolve(args.rom, max_generations=args.generations, max_turns=args.max_turns)
+
+    # Summary
+    improvements = [r for r in results if r.improved]
+    print(f"\n[evolve] {len(improvements)}/{len(results)} generations improved")
+
+
+if __name__ == "__main__":
+    main()

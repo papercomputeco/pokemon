@@ -1,5 +1,7 @@
 # Pokemon Agent
 
+![Pokemon Agent](hero2.png)
+
 Autonomous Pokemon Red player that reads game memory, makes strategic decisions, and plays headlessly inside a stereOS VM.
 
 ## Architecture
@@ -42,7 +44,7 @@ The VM configuration lives in `jcard.toml`. It mounts the repo at `/workspace`, 
 
 ```bash
 bash scripts/install.sh
-python3 scripts/agent.py rom/pokemon_red.gb --strategy heuristic --max-turns 1000
+uv run scripts/agent.py rom/pokemon_red.gb --strategy heuristic --max-turns 1000
 ```
 
 Add `--save-screenshots` to capture frames every 10 turns into `frames/`.
@@ -51,7 +53,7 @@ Add `--save-screenshots` to capture frames every 10 turns into `frames/`.
 
 ## How It Works
 
-**Game loop.** Each turn the agent ticks PyBoy forward, reads memory, decides, and acts. Turns are cheap. The agent runs hundreds of thousands of them to progress through the game.
+**Game loop.** Each turn the agent ticks PyBoy forward, reads memory, decides, and acts. Turns are cheap — headless mode removes the 60fps cap and all rendering, so the emulator runs ~100x faster than real-time. The agent runs hundreds of thousands of them to progress through the game.
 
 **Memory reading.** `MemoryReader` pulls structured data from fixed addresses in Pokemon Red's RAM: battle type, HP, moves, PP, map ID, coordinates, badges, party state. These addresses are specific to the US release.
 
@@ -73,11 +75,79 @@ tapes checkout <hash>   # restore a previous conversation state
 
 Session data lives in `.tapes/` (gitignored).
 
+## Observational Memory
+
+Inspired by [Mastra's observational memory](https://mastra.ai/blog/observational-memory), this system reads the [Tapes](https://tapes.dev) SQLite database, extracts noteworthy events via heuristic pattern matching (no LLM calls), and writes prioritized observations to memory files.
+
+Tapes records every LLM conversation as a content-addressable DAG of nodes in `.tapes/tapes.sqlite`. The observer walks these conversation chains, identifies patterns (errors, file creations, token usage), and writes observations alongside the database.
+
+```
+.tapes/
+├── tapes.sqlite             # Tapes DB: nodes, embeddings, facets
+└── memory/
+    ├── observations.md      # date-grouped observations with priority tags
+    └── observer_state.json  # watermark tracking processed sessions
+```
+
+**What it extracts:**
+- Session goals (first user message)
+- Tool errors and exception tracebacks
+- Files created during the session
+- Token usage summaries
+
+Each observation is tagged `[important]`, `[possible]`, or `[informational]` based on keyword matching (e.g. bug/error/crash are important, test/refactor are possible).
+
+```bash
+# Preview observations without writing
+uv run scripts/observe_cli.py --dry-run
+
+# Process all unprocessed sessions
+uv run scripts/observe_cli.py
+
+# Reprocess everything from scratch
+uv run scripts/observe_cli.py --reset
+
+# Process a single session by root node hash
+uv run scripts/observe_cli.py --session <hash>
+```
+
+Auto-detects `.tapes/tapes.sqlite` from cwd. Override with `--db`.
+
+## AlphaEvolve Strategy Evolution
+
+Inspired by [AlphaEvolve](https://arxiv.org/abs/2506.13131) (DeepMind), the agent can automatically improve its navigation parameters through headless evaluation runs. Instead of manually tuning thresholds, the evolution harness runs 10 agent variants in parallel, scores them against a composite fitness function, and keeps the winner.
+
+**How it works.** The agent's navigator has tunable knobs: stuck threshold, door cooldown, waypoint skip distance, axis preference. The harness treats these as a genome. Each generation, it either asks an LLM to propose a mutation (informed by observer diagnostics) or randomly perturbs values. The variant runs headless, and its fitness is compared to the current best.
+
+```bash
+# Run the evolution harness (LLM-free random perturbation by default)
+uv run scripts/evolve.py rom/pokemon_red.gb --generations 5 --max-turns 1000
+
+# Run 10 parameter variants in parallel and rank them
+uv run scripts/run_10_agents.py rom/pokemon_red.gb
+```
+
+The observer feeds failure context (stuck events, tool errors) into the LLM mutation prompt so variants target actual problems rather than making blind changes.
+
+**First finding:** `door_cooldown=2` beats the default of 8. Shorter cooldown means fewer wasted turns walking away from doors before retrying. Confirmed across two milestones (Pokemon selection and rival battle) with 10 independent runs each.
+
+### Long-session mode
+
+You can still run the agent the traditional way for a single long session, the way [ClaudePlaysPokemon](https://www.twitch.tv/claudeplayspokemon) works on Twitch:
+
+```bash
+uv run scripts/agent.py rom/pokemon_red.gb --strategy heuristic --max-turns 50000
+```
+
+The two approaches complement each other. Long sessions are better for discovering new capabilities and debugging game-specific logic. The evolution loop is better for optimizing parameters once the code structure exists.
+
 ## Project Structure
 
 ```
 pokemon-agent/
 ├── README.md                # this file
+├── LICENSE                  # MIT license
+├── CONTRIBUTING.md          # contributor guide
 ├── SKILL.md                 # skill definition for stereOS agents
 ├── jcard.toml               # stereOS VM configuration
 ├── .tapes/                  # Tapes telemetry DB + config (gitignored)
@@ -86,12 +156,20 @@ pokemon-agent/
 ├── scripts/
 │   ├── install.sh           # setup: Python, PyBoy, Tapes
 │   ├── agent.py             # main agent loop + strategies
-│   └── memory_reader.py     # memory address definitions
+│   ├── memory_reader.py     # memory address definitions
+│   ├── memory_file.py       # agent memory management
+│   ├── tape_reader.py       # Tapes SQLite reader (stdlib only)
+│   ├── observer.py          # heuristic observation extractor
+│   ├── observe_cli.py       # CLI for running the observer
+│   ├── pathfinding.py       # collision map + backtrack manager
+│   ├── evolve.py            # AlphaEvolve strategy evolution harness
+│   └── run_10_agents.py     # parallel multi-agent evaluation runner
 ├── references/
 │   ├── routes.json          # overworld waypoints
 │   └── type_chart.json      # type effectiveness data
-└── pokedex/
-    └── log1.md              # session log: stereOS setup notes
+├── pokedex/
+│   └── log1.md              # session log: stereOS setup notes
+└── tests/                   # 100% coverage test suite
 ```
 
 ## Pokedex
@@ -114,8 +192,26 @@ Target turn counts for community benchmarking. Fork it, improve the strategy, po
 | 8 badges | ~200,000 | ~100,000 | ~60,000 |
 | Elite Four | ~300,000 | ~150,000 | ~80,000 |
 
+## FLE-Style Backtracking
+
+Inspired by the [Factorio Learning Environment](https://arxiv.org/abs/2503.09617)'s `BacktrackingAgent`, the agent snapshots game state at key moments (map changes, periodic intervals) and restores when stuck. This directly addresses navigation dead-ends like Route 1's y=28 blocker — instead of wasting turns in a loop, the agent reverts to a known-good state and tries an alternate path.
+
+Snapshots use PyBoy's `save_state()`/`load_state()` with in-memory `BytesIO` buffers (~130KB each, <1ms). A bounded deque keeps the most recent 8 snapshots. Each snapshot tracks its restore count, and after 3 failed attempts from the same snapshot it's discarded. Four parameters control the behavior and are evolvable through AlphaEvolve:
+
+| Parameter | Default | Description |
+|---|---|---|
+| `bt_max_snapshots` | 8 | Max snapshots in the deque |
+| `bt_restore_threshold` | 15 | Stuck turns before restoring |
+| `bt_max_attempts` | 3 | Retries per snapshot |
+| `bt_snapshot_interval` | 50 | Periodic snapshot frequency |
+
+Scripted areas like Oak's Lab (map 40) disable backtracking entirely — the lab's multi-phase cutscene looks "stuck" but is progressing naturally.
+
 ## Inspiration & References
 
+- [Factorio Learning Environment](https://arxiv.org/abs/2503.09617) — Backtracking agent patterns, structured observations, and incremental report distillation for game-playing LLM agents
+- [AlphaEvolve](https://arxiv.org/abs/2506.13131) — DeepMind's LLM-driven code evolution framework
+- [Discovering Multiagent Learning Algorithms with LLMs](https://arxiv.org/abs/2602.16928) — AlphaEvolve applied to game-playing agents
 - [ClaudePlaysPokemon](https://www.twitch.tv/claudeplayspokemon) — Anthropic's Claude-plays-Pokemon Twitch stream
 - [Insights into Claude Opus 4.5 from Pokemon](https://www.lesswrong.com/posts/u6Lacc7wx4yYkBQ3r/insights-into-claude-opus-4-5-from-pokemon) — Navigation, memory notes, and spatial reasoning analysis
 - [ClaudePlaysPokemon Harness Changes](https://docs.google.com/document/u/1/d/e/2PACX-1vRIsu2pLI21W4KjfYbN13or8E-8cvJYw570wGMEp4UQU63ZhEh9FPGgj2ark8Yk7Vyrtt9MWq3jnn4h/pub) — Minimap, navigator, and memory file evolution

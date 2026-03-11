@@ -32,3 +32,15 @@ venv/
 # Environment / secrets
 .env
 *.key
+
+# Claude Code (user-specific)
+.claude/
+
+# Test artifacts
+.coverage
+.pytest_cache/
+
+# Pokedex session logs (log7+ are local-only run artifacts)
+pokedex/log[7-9]*.md
+pokedex/log1[0-9]*.md
+pokedex/log2[0-9]*.md
