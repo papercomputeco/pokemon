@@ -113,6 +113,52 @@ uv run scripts/observe_cli.py --session <hash>
 
 Auto-detects `.tapes/tapes.sqlite` from cwd. Override with `--db`.
 
+## Kafka Telemetry Pipeline
+
+The agent streams every LLM conversation turn to Kafka as structured events. A Tapes proxy sits between the agent and the Anthropic API, publishing `tapes.node.v1` events to the `agent.telemetry.raw` topic. Downstream consumers and Flink jobs process the stream in real time.
+
+```
+Agent → Tapes Proxy → Kafka (agent.telemetry.raw)
+                          ├→ telemetry-consumer (prints + writes JSONL)
+                          ├→ Flink SQL (anomaly detection)
+                          │    └→ Kafka (agent.telemetry.alerts)
+                          │         └→ alerts-consumer (prints + writes Tapes nodes)
+                          └→ DuckDB (ad-hoc queries on JSONL sink)
+```
+
+Each event contains the conversation root hash, node role (assistant/user/tool), model, token usage, and timestamp. Content arrays are excluded from the Flink schema since anomaly detection only needs metadata.
+
+```bash
+# Start the full pipeline (Kafka, Flink, consumers, Tapes proxy)
+docker compose up -d
+
+# Watch raw telemetry events
+docker compose logs -f telemetry-consumer
+
+# Watch anomaly alerts
+docker compose logs -f alerts-consumer
+
+# Flink dashboard
+open http://localhost:8081
+```
+
+The Tapes proxy listens on port 8080. Point the agent at it by setting `ANTHROPIC_API_BASE=http://localhost:8080` so every API call flows through Kafka.
+
+A local-first alternative exists for development without a broker: pass `--telemetry-dir` to the agent and it writes JSONL files directly via `scripts/publisher.py`.
+
+## Flink Anomaly Detection
+
+Apache Flink (1.18) runs two SQL jobs against the telemetry stream:
+
+| Job | Window | Trigger | What it catches |
+|---|---|---|---|
+| Stuck loop | 30s tumbling | 10+ assistant turns per conversation | Agent repeating the same action in a loop |
+| Token spike | 2min tumbling | Max input tokens > 2x average | Unexpected prompt size growth or injection |
+
+Both jobs write alerts to the `agent.telemetry.alerts` Kafka topic. The alerts consumer picks them up and optionally writes them as Tapes nodes back into `.tapes/tapes.sqlite`, feeding anomalies into the observational memory system.
+
+Flink SQL definitions live in `docker/flink-sql/init.sql`. The connector JAR is downloaded automatically at startup.
+
 ## AlphaEvolve Strategy Evolution
 
 Inspired by [AlphaEvolve](https://arxiv.org/abs/2506.13131) (DeepMind), the agent can automatically improve its navigation parameters through headless evaluation runs. Instead of manually tuning thresholds, the evolution harness runs 10 agent variants in parallel, scores them against a composite fitness function, and keeps the winner.
@@ -177,6 +223,14 @@ pokemon-agent/
 ├── .tapes/                  # Tapes telemetry DB + config (gitignored)
 ├── frames/                  # screenshot output (gitignored)
 ├── rom/                     # user-provided ROM files (gitignored)
+├── docker-compose.yml       # Kafka + Flink + consumers stack
+├── docker/
+│   ├── tapes-proxy/         # Tapes proxy that publishes to Kafka
+│   ├── telemetry-consumer/  # raw event consumer + JSONL writer
+│   ├── alerts-consumer/     # anomaly alert consumer + Tapes writer
+│   └── flink-sql/
+│       ├── init.sql          # Flink SQL jobs (stuck loop, token spike)
+│       └── submit-jobs.sh    # startup script for SQL client
 ├── scripts/
 │   ├── install.sh           # setup: Python, PyBoy, Tapes
 │   ├── agent.py             # main agent loop + strategies
@@ -185,6 +239,10 @@ pokemon-agent/
 │   ├── tape_reader.py       # Tapes SQLite reader (stdlib only)
 │   ├── observer.py          # heuristic observation extractor
 │   ├── observe_cli.py       # CLI for running the observer
+│   ├── publisher.py         # local-first JSONL telemetry publisher
+│   ├── historical_observer.py # cross-session insights via DuckDB
+│   ├── query_telemetry.py   # ad-hoc telemetry queries
+│   ├── tape_writer.py       # writes synthetic Tapes nodes to SQLite
 │   ├── pathfinding.py       # collision map + backtrack manager
 │   ├── evolve.py            # AlphaEvolve strategy evolution harness
 │   └── run_10_agents.py     # parallel multi-agent evaluation runner

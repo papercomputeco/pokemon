@@ -1,23 +1,5 @@
 [
   {
-    "agent_id": 0,
-    "label": "baseline_4dc",
-    "params": {
-      "stuck_threshold": 8,
-      "door_cooldown": 4,
-      "waypoint_skip_distance": 3,
-      "axis_preference_map_0": "y",
-      "bt_max_snapshots": 8,
-      "bt_restore_threshold": 15,
-      "bt_max_attempts": 3,
-      "bt_snapshot_interval": 50
-    },
-    "fitness": {},
-    "score": -999,
-    "elapsed": 0.1,
-    "error": "Expecting value: line 1 column 1 (char 0)"
-  },
-  {
     "agent_id": 1,
     "label": "original",
     "params": {
@@ -36,10 +18,10 @@
     "error": "Expecting value: line 1 column 1 (char 0)"
   },
   {
-    "agent_id": 4,
-    "label": "high_stuck_dc4",
+    "agent_id": 0,
+    "label": "baseline_4dc",
     "params": {
-      "stuck_threshold": 12,
+      "stuck_threshold": 8,
       "door_cooldown": 4,
       "waypoint_skip_distance": 3,
       "axis_preference_map_0": "y",
@@ -50,7 +32,7 @@
     },
     "fitness": {},
     "score": -999,
-    "elapsed": 0.1,
+    "elapsed": 0.2,
     "error": "Expecting value: line 1 column 1 (char 0)"
   },
   {
@@ -90,12 +72,48 @@
     "error": "Expecting value: line 1 column 1 (char 0)"
   },
   {
+    "agent_id": 4,
+    "label": "high_stuck_dc4",
+    "params": {
+      "stuck_threshold": 12,
+      "door_cooldown": 4,
+      "waypoint_skip_distance": 3,
+      "axis_preference_map_0": "y",
+      "bt_max_snapshots": 8,
+      "bt_restore_threshold": 15,
+      "bt_max_attempts": 3,
+      "bt_snapshot_interval": 50
+    },
+    "fitness": {},
+    "score": -999,
+    "elapsed": 0.1,
+    "error": "Expecting value: line 1 column 1 (char 0)"
+  },
+  {
     "agent_id": 5,
     "label": "wide_skip_dc4",
     "params": {
       "stuck_threshold": 8,
       "door_cooldown": 4,
       "waypoint_skip_distance": 6,
+      "axis_preference_map_0": "y",
+      "bt_max_snapshots": 8,
+      "bt_restore_threshold": 15,
+      "bt_max_attempts": 3,
+      "bt_snapshot_interval": 50
+    },
+    "fitness": {},
+    "score": -999,
+    "elapsed": 0.1,
+    "error": "Expecting value: line 1 column 1 (char 0)"
+  },
+  {
+    "agent_id": 6,
+    "label": "narrow_dc4",
+    "params": {
+      "stuck_threshold": 8,
+      "door_cooldown": 4,
+      "waypoint_skip_distance": 1,
       "axis_preference_map_0": "y",
       "bt_max_snapshots": 8,
       "bt_restore_threshold": 15,
@@ -115,24 +133,6 @@
       "door_cooldown": 4,
       "waypoint_skip_distance": 3,
       "axis_preference_map_0": "x",
-      "bt_max_snapshots": 8,
-      "bt_restore_threshold": 15,
-      "bt_max_attempts": 3,
-      "bt_snapshot_interval": 50
-    },
-    "fitness": {},
-    "score": -999,
-    "elapsed": 0.1,
-    "error": "Expecting value: line 1 column 1 (char 0)"
-  },
-  {
-    "agent_id": 6,
-    "label": "narrow_dc4",
-    "params": {
-      "stuck_threshold": 8,
-      "door_cooldown": 4,
-      "waypoint_skip_distance": 1,
-      "axis_preference_map_0": "y",
       "bt_max_snapshots": 8,
       "bt_restore_threshold": 15,
       "bt_max_attempts": 3,
@@ -180,6 +180,44 @@
     "error": "Expecting value: line 1 column 1 (char 0)"
   },
   {
+    "agent_id": 11,
+    "label": "no_bt",
+    "params": {
+      "stuck_threshold": 8,
+      "door_cooldown": 4,
+      "waypoint_skip_distance": 3,
+      "axis_preference_map_0": "y",
+      "bt_max_snapshots": 0,
+      "bt_restore_threshold": 999,
+      "bt_max_attempts": 3,
+      "bt_snapshot_interval": 50
+    },
+    "fitness": {},
+    "score": -999,
+    "elapsed": 0.1,
+    "error": "Expecting value: line 1 column 1 (char 0)"
+  },
+  {
+    "agent_id": 12,
+    "label": "aggressive_battle",
+    "params": {
+      "stuck_threshold": 8,
+      "door_cooldown": 4,
+      "waypoint_skip_distance": 3,
+      "axis_preference_map_0": "y",
+      "bt_max_snapshots": 8,
+      "bt_restore_threshold": 15,
+      "bt_max_attempts": 3,
+      "bt_snapshot_interval": 50,
+      "hp_run_threshold": 0.1,
+      "hp_heal_threshold": 0.15
+    },
+    "fitness": {},
+    "score": -999,
+    "elapsed": 0.1,
+    "error": "Expecting value: line 1 column 1 (char 0)"
+  },
+  {
     "agent_id": 10,
     "label": "aggressive_bt",
     "params": {
@@ -198,17 +236,58 @@
     "error": "Expecting value: line 1 column 1 (char 0)"
   },
   {
-    "agent_id": 11,
-    "label": "no_bt",
+    "agent_id": 14,
+    "label": "status_moves",
     "params": {
       "stuck_threshold": 8,
       "door_cooldown": 4,
       "waypoint_skip_distance": 3,
       "axis_preference_map_0": "y",
-      "bt_max_snapshots": 0,
-      "bt_restore_threshold": 999,
+      "bt_max_snapshots": 8,
+      "bt_restore_threshold": 15,
       "bt_max_attempts": 3,
-      "bt_snapshot_interval": 50
+      "bt_snapshot_interval": 50,
+      "status_move_score": 5.0
+    },
+    "fitness": {},
+    "score": -999,
+    "elapsed": 0.1,
+    "error": "Expecting value: line 1 column 1 (char 0)"
+  },
+  {
+    "agent_id": 13,
+    "label": "cautious_battle",
+    "params": {
+      "stuck_threshold": 8,
+      "door_cooldown": 4,
+      "waypoint_skip_distance": 3,
+      "axis_preference_map_0": "y",
+      "bt_max_snapshots": 8,
+      "bt_restore_threshold": 15,
+      "bt_max_attempts": 3,
+      "bt_snapshot_interval": 50,
+      "hp_run_threshold": 0.35,
+      "hp_heal_threshold": 0.4
+    },
+    "fitness": {},
+    "score": -999,
+    "elapsed": 0.1,
+    "error": "Expecting value: line 1 column 1 (char 0)"
+  },
+  {
+    "agent_id": 15,
+    "label": "full_aggressive",
+    "params": {
+      "stuck_threshold": 3,
+      "door_cooldown": 2,
+      "waypoint_skip_distance": 5,
+      "axis_preference_map_0": "y",
+      "bt_max_snapshots": 8,
+      "bt_restore_threshold": 15,
+      "bt_max_attempts": 3,
+      "bt_snapshot_interval": 50,
+      "hp_run_threshold": 0.1,
+      "hp_heal_threshold": 0.15
     },
     "fitness": {},
     "score": -999,
