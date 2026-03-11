@@ -1,5 +1,7 @@
 # Pokemon Agent
 
+> See also: [pokemon-kafka](https://github.com/papercomputeco/pokemon-kafka) — Streams gameplay events through Kafka for large-scale data processing and uses Flink for real-time anomaly detection and self-healing.
+
 ![Pokemon Agent](hero2.png)
 
 Autonomous Pokemon Red player that reads game memory, makes strategic decisions, and plays headlessly inside a stereOS VM.
