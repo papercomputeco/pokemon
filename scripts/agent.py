@@ -19,6 +19,7 @@ from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
+
 try:
     from pyboy import PyBoy
 except ImportError:
@@ -712,7 +713,6 @@ class PokemonAgent:
             f"Enemy HP: {battle.enemy_hp}/{battle.enemy_max_hp} | "
             f"Action: {action}"
         )
-
         if action["action"] == "fight":
             # Navigate to FIGHT menu
             self.controller.press("a")  # Select FIGHT

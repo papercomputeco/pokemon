@@ -5,9 +5,9 @@ mixtape = "opencode-mixtape:latest"
 name = "pokemon-agent"
 
 [resources]
-cpus   = 2
-memory = "4GiB"
-disk   = "20GiB"
+cpus   = 4
+memory = "8GiB"
+disk   = "30GiB"
 
 [network]
 mode = "nat"
@@ -21,12 +21,14 @@ host = "./"
 guest = "/workspace"
 readonly = false
 
+[env]
+ANTHROPIC_API_BASE = "http://localhost:8080"
+
 [secrets]
-# Only needed for LLM strategy
-# ANTHROPIC_API_KEY = "${ANTHROPIC_API_KEY}"
+ANTHROPIC_API_KEY = "${ANTHROPIC_API_KEY}"
 
 [agent]
 harness = "claude-code"
-prompt = "cd /workspace && bash scripts/install.sh && export LD_LIBRARY_PATH=$HOME/.nix-profile/lib:$LD_LIBRARY_PATH && export PATH=/usr/local/bin:$PATH && tapes serve proxy --config-dir /workspace/.tapes --sqlite /workspace/.tapes/tapes.sqlite & sleep 2 && ~/venv/bin/python3 scripts/agent.py rom/pokemon_red.gb --strategy heuristic --max-turns 500000"
+prompt = "bash /workspace/scripts/entrypoint.sh"
 workdir = "/workspace"
 restart = "no"
