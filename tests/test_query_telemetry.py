@@ -258,6 +258,79 @@ def test_main_interactive_keyboard_interrupt(telemetry_dir):
         main()
 
 
+@pytest.fixture
+def warehouse_db(tmp_path, telemetry_dir):
+    """Create a persistent DuckDB warehouse with dlt-style flattened columns."""
+    db_path = tmp_path / "warehouse.duckdb"
+    conn = duckdb.connect(str(db_path))
+    conn.execute("CREATE SCHEMA IF NOT EXISTS raw")
+    pattern = str(telemetry_dir / "*.jsonl")
+    conn.execute(
+        f"""
+        CREATE TABLE raw.events AS SELECT
+            schema, root_hash, occurred_at,
+            node.bucket.role AS node__bucket__role,
+            node.bucket.model AS node__bucket__model,
+            node.usage.input_tokens AS node__usage__input_tokens,
+            node.usage.output_tokens AS node__usage__output_tokens,
+            node.project AS node__project
+        FROM read_json_auto('{pattern}')
+        """
+    )
+    conn.close()
+    return db_path
+
+
+def test_create_connection_warehouse(warehouse_db):
+    """create_connection with db_path queries the warehouse table."""
+    from query_telemetry import create_connection
+
+    conn = create_connection(Path("/nonexistent"), db_path=warehouse_db)
+    result = conn.execute("SELECT count(*) FROM events").fetchone()
+    assert result[0] == 2
+
+
+def test_main_db_flag(warehouse_db):
+    """--db flag queries the warehouse instead of JSONL files."""
+    from query_telemetry import main
+
+    with (
+        patch("sys.argv", ["query_telemetry.py", "--db", str(warehouse_db)]),
+        patch("duckdb.DuckDBPyConnection.execute") as mock_exec,
+    ):
+        mock_exec.return_value.fetchdf = _mock_fetchdf
+        main()
+
+
+def test_main_db_flag_interactive(warehouse_db):
+    """--db flag works in interactive mode."""
+    from query_telemetry import main
+
+    with (
+        patch("sys.argv", ["query_telemetry.py", "--interactive", "--db", str(warehouse_db)]),
+        patch("builtins.input", return_value=""),
+    ):
+        main()
+
+
+def test_parse_db_flag():
+    """_parse_db_flag extracts --db from raw args."""
+    from query_telemetry import _parse_db_flag
+
+    remaining, db_path = _parse_db_flag(["--db", "/some/path.duckdb", "--sessions"])
+    assert db_path == Path("/some/path.duckdb")
+    assert remaining == ["--sessions"]
+
+
+def test_parse_db_flag_absent():
+    """_parse_db_flag returns None when --db not present."""
+    from query_telemetry import _parse_db_flag
+
+    remaining, db_path = _parse_db_flag(["--sessions", "data/telemetry"])
+    assert db_path is None
+    assert remaining == ["--sessions", "data/telemetry"]
+
+
 def test_dunder_main_guard(telemetry_dir):
     """if __name__ == '__main__': main()"""
     import query_telemetry as qt_mod
